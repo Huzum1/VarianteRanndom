@@ -4,6 +4,10 @@ import random
 from io import StringIO
 import time
 
+# =========================================================================
+# CONFIGURARE PAGINĂ ȘI CSS
+# =========================================================================
+
 # Configurare pagină
 st.set_page_config(
     page_title="Generator Variante Loterie",
@@ -45,16 +49,51 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# =========================================================================
+# INITIALIZARE SESIUNE ȘI FUNCȚII UTILITY
+# =========================================================================
+
 # Inițializare session state
 if 'variants' not in st.session_state:
     st.session_state.variants = []
 if 'generated_variants' not in st.session_state:
     st.session_state.generated_variants = []
+if 'internal_duplicates' not in st.session_state:
+    st.session_state.internal_duplicates = 0
+if 'inter_duplicates' not in st.session_state:
+    st.session_state.inter_duplicates = 0
+if 'rounds' not in st.session_state: # NOU: Starea pentru runde
+    st.session_state.rounds = []
+if 'win_score' not in st.session_state: # NOU: Starea pentru scor
+    st.session_state.win_score = 0
+
+def clean_variant_combination(numbers_str):
+    """
+    Curăță șirul de numere, asigură unicitatea (elimină duplicatele din aceeași variantă)
+    și le sortează. Returnează combinația curățată și numărul de duplicate eliminate.
+    """
+    try:
+        parts = [p.strip() for p in numbers_str.split() if p.strip().isdigit()]
+        valid_numbers = [int(p) for p in parts]
+        
+        unique_numbers = list(set(valid_numbers))
+        unique_numbers.sort()
+        
+        duplicates_removed = len(valid_numbers) - len(unique_numbers)
+        cleaned_combination = ' '.join(map(str, unique_numbers))
+        
+        return cleaned_combination, duplicates_removed
+        
+    except:
+        return numbers_str, 0
 
 def parse_variants(text):
-    """Parse variantele din text"""
+    """
+    Parse variantele din text, curățând duplicatele din interiorul fiecărei combinații.
+    """
     variants = []
     errors = []
+    total_internal_duplicates_removed = 0
     
     lines = text.strip().split('\n')
     for i, line in enumerate(lines, 1):
@@ -78,29 +117,110 @@ def parse_variants(text):
             errors.append(f"Linia {i}: Combinație lipsă")
             continue
         
+        cleaned_combination, duplicates_removed = clean_variant_combination(numbers)
+        total_internal_duplicates_removed += duplicates_removed
+        
+        # Presupunem minim 4 numere unice necesare
+        if len(cleaned_combination.split()) < 4: 
+            errors.append(f"Linia {i}: Combinația '{numbers}' are sub 4 numere unice după curățare.")
+            continue
+
         variants.append({
             'id': variant_id,
-            'combination': numbers
+            'combination': cleaned_combination
         })
     
-    return variants, errors
+    # Etapa finală: Elimină duplicatele între variante
+    df = pd.DataFrame(variants)
+    if not df.empty:
+        df_unique = df.drop_duplicates(subset=['combination']).reset_index(drop=True)
+        # Reatribuie ID-urile serial
+        df_unique['id'] = (df_unique.index + 1).astype(str)
+        
+        final_variants = df_unique.to_dict('records')
+        
+        total_inter_duplicates_removed = len(variants) - len(final_variants)
+    else:
+        final_variants = []
+        total_inter_duplicates_removed = 0
+    
+    return final_variants, errors, total_internal_duplicates_removed, total_inter_duplicates_removed
+
+def parse_rounds(rounds_file):
+    """NOU: Procesează fișierul de runde (extragere)."""
+    if rounds_file is None:
+        return [], 0
+    
+    rounds_list = []
+    
+    try:
+        content = rounds_file.read().decode("utf-8")
+        
+        for line in content.splitlines():
+            # Extrage numerele
+            parts = [p.strip() for p in line.replace(',', ' ').split() if p.strip().isdigit()]
+            # Creează un set de numere unice pentru fiecare rundă
+            round_numbers = {int(p) for p in parts if p.isdigit()} 
+            
+            # Asumăm că o rundă trebuie să aibă minim 4 numere extrase pentru a fi relevantă
+            if len(round_numbers) >= 4:
+                rounds_list.append(round_numbers)
+                
+        return rounds_list, len(rounds_list)
+    except Exception as e:
+        st.error(f"Eroare la procesarea rundelor: {e}")
+        return [], 0
+
+def calculate_wins(generated_variants, rounds):
+    """NOU: Calculează numărul de potriviri (4/4, 5/5, etc.) pentru variantele generate."""
+    if not rounds or not generated_variants:
+        return 0
+    
+    total_wins = 0
+    
+    for variant_data in generated_variants:
+        # Extrage numerele variantei și le pune într-un set
+        try:
+            variant_numbers_list = [int(n) for n in variant_data['combination'].split() if n.isdigit()]
+            variant_set = set(variant_numbers_list)
+        except:
+            continue
+        
+        # O potrivire (win) apare dacă varianta este un subset al unei runde
+        # Adică toate numerele din variantă se regăsesc în numerele extrase din rundă.
+        for runda in rounds:
+            if variant_set.issubset(runda):
+                total_wins += 1
+                
+    return total_wins
 
 def generate_sample_data(count=100):
-    """Generează date de exemplu"""
+    """Generează date de exemplu, incluzând DUPLICATE PENTRU TESTARE"""
     sample_data = []
-    for i in range(1, count + 1):
+    
+    sample_data.append(f"1, 5 7 44 32 18")
+    sample_data.append(f"2, 12 23 34 34 49")
+    sample_data.append(f"3, 7 5 44 32 18") 
+
+    for i in range(4, count + 1):
         numbers = [str(random.randint(1, 49)) for _ in range(6)]
         sample_data.append(f"{i}, {' '.join(numbers)}")
+        
     return '\n'.join(sample_data)
 
 def variants_to_text(variants):
-    """Convertește variantele în text"""
-    return '\n'.join([f"{v['id']}, {v['combination']}" for v in variants])
+    """Convertește variantele în text (ID, numere separate prin spațiu)"""
+    # Folosește separatorul virgulă în output, conform formatului solicitat
+    return '\n'.join([f"{v['id']},{v['combination']}" for v in variants])
 
 def variants_to_csv(variants):
     """Convertește variantele în CSV"""
     df = pd.DataFrame(variants)
     return df.to_csv(index=False)
+
+# =========================================================================
+# STREAMLIT UI & LOGIC FLOW
+# =========================================================================
 
 # Header
 st.markdown("# 🎲 Generator Variante Loterie")
@@ -109,36 +229,35 @@ st.markdown("### Gestionează și generează variante aleatorii pentru loterie")
 # Sidebar
 with st.sidebar:
     st.markdown("## 📊 Statistici")
-    st.metric("Variante Încărcate", len(st.session_state.variants))
+    st.metric("Variante Curățate", len(st.session_state.variants))
     st.metric("Variante Generate", len(st.session_state.generated_variants))
-    
+    st.metric("Runde Încărcate", len(st.session_state.rounds))
+    st.metric("Scor Win", st.session_state.win_score)
+    st.markdown("---")
+    st.markdown("## 🧹 Duplicate Eliminate")
+    st.metric("În Combinații (Interne)", st.session_state.internal_duplicates)
+    st.metric("Între Combinații (Inter-Variante)", st.session_state.inter_duplicates)
+
     st.markdown("---")
     st.markdown("## ℹ️ Informații")
-    st.info("""
-    **Format acceptat:**
-    ```
-    ID, numere separate prin spațiu
-    ```
-    
-    **Exemplu:**
-    ```
-    1, 5 7 44 32 18
-    2, 12 23 34 45 49
-    ```
-    """)
+    st.info("Aplicația elimină automat duplicatele și afișează scorul WIN pe baza rundelor încărcate.")
     
     st.markdown("---")
     if st.button("🗑️ Resetează Tot", use_container_width=True):
         st.session_state.variants = []
         st.session_state.generated_variants = []
+        st.session_state.internal_duplicates = 0
+        st.session_state.inter_duplicates = 0
+        st.session_state.rounds = []
+        st.session_state.win_score = 0
         st.rerun()
 
 # Tabs principale
-tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante", "🎲 Generează Random", "📊 Rezultate"])
+tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante & Curăță", "🎲 Generează Random & Calculează Win", "📊 Rezultate"])
 
 # TAB 1: Încărcare Variante
 with tab1:
-    st.markdown("## 📝 Pas 1: Încarcă Variantele Tale")
+    st.markdown("## 📝 Pas 1: Încarcă Variantele Tale & Curăță Duplicatele")
     
     col1, col2 = st.columns([3, 1])
     
@@ -150,7 +269,7 @@ with tab1:
         if st.button("✨ Generează Date Exemplu", use_container_width=True):
             sample = generate_sample_data(100)
             st.session_state.sample_data = sample
-            st.success("✅ S-au generat 100 variante exemplu!")
+            st.success("✅ S-au generat 100 variante exemplu (inclusiv duplicate pentru testare)!")
     
     # Textarea pentru input
     default_value = st.session_state.get('sample_data', '')
@@ -158,24 +277,30 @@ with tab1:
         "Variante",
         value=default_value,
         height=300,
-        placeholder="Exemplu:\n1, 5 7 44 32 18\n2, 12 23 34 45 49\n3, 1 2 3 4 5",
+        placeholder="Exemplu:\n1, 5 7 44 32 18\n2, 12 23 34 34 49\n3, 7 5 44 32 18",
         label_visibility="collapsed"
     )
     
     # Butoane de acțiune
-    col1, col2, col3 = st.columns([2, 2, 2])
+    col_load, col_file, col_download_baza = st.columns([2, 2, 2])
     
-    with col1:
-        if st.button("📥 Încarcă Variante", use_container_width=True, type="primary"):
+    with col_load:
+        if st.button("📥 Încarcă & Curăță Variante", use_container_width=True, type="primary"):
             if not variants_input.strip():
                 st.error("❌ Te rog să introduci variante!")
             else:
-                with st.spinner("Se încarcă variantele..."):
-                    variants, errors = parse_variants(variants_input)
+                with st.spinner("Se încarcă și se curăță variantele..."):
+                    
+                    variants, errors, internal_duplicates, inter_duplicates = parse_variants(variants_input)
+                    
+                    st.session_state.variants = variants
+                    st.session_state.internal_duplicates = internal_duplicates
+                    st.session_state.inter_duplicates = inter_duplicates
+                    st.session_state.sample_data = variants_input
                     
                     if variants:
-                        st.session_state.variants = variants
-                        st.success(f"✅ S-au încărcat {len(variants)} variante cu succes!")
+                        st.success(f"✅ S-au încărcat {len(variants)} variante unice cu succes!")
+                        st.info(f"S-au eliminat {internal_duplicates} numere duplicate din combinații și {inter_duplicates} variante complet identice.")
                         
                         if errors:
                             with st.expander("⚠️ Avertismente"):
@@ -187,8 +312,7 @@ with tab1:
                             for error in errors:
                                 st.error(error)
     
-    with col2:
-        # Upload fișier
+    with col_file:
         uploaded_file = st.file_uploader(
             "Sau încarcă fișier TXT/CSV",
             type=['txt', 'csv'],
@@ -198,119 +322,148 @@ with tab1:
         
         if uploaded_file is not None:
             content = uploaded_file.read().decode('utf-8')
-            variants, errors = parse_variants(content)
+            variants, errors, internal_duplicates, inter_duplicates = parse_variants(content)
+            
+            st.session_state.variants = variants
+            st.session_state.internal_duplicates = internal_duplicates
+            st.session_state.inter_duplicates = inter_duplicates
             
             if variants:
-                st.session_state.variants = variants
-                st.success(f"✅ S-au încărcat {len(variants)} variante din fișier!")
+                st.success(f"✅ S-au încărcat {len(variants)} variante unice din fișier!")
             else:
                 st.error("❌ Fișierul nu conține variante valide!")
     
-    with col3:
+    with col_download_baza:
         if st.session_state.variants:
             st.download_button(
-                "💾 Descarcă Variante",
+                "💾 Descarcă Variante Curățate",
                 data=variants_to_text(st.session_state.variants),
-                file_name="variante_complete.txt",
+                file_name="variante_curatate_unice.txt",
                 mime="text/plain",
-                use_container_width=True
+                use_container_width=True,
+                help="Descarcă baza de date după ce au fost eliminate toate duplicatele."
             )
     
-    # Previzualizare variante încărcate
     if st.session_state.variants:
         st.markdown("---")
-        st.markdown("### 👀 Previzualizare Variante Încărcate")
+        st.markdown("### 👀 Previzualizare Variante Curățate")
         
-        # Afișare primele și ultimele 5 variante
         df_preview = pd.DataFrame(st.session_state.variants)
         
         if len(st.session_state.variants) > 10:
-            st.markdown(f"**Primele 5 variante din {len(st.session_state.variants)}:**")
             st.dataframe(df_preview.head(5), use_container_width=True, hide_index=True)
-            
-            st.markdown(f"**Ultimele 5 variante:**")
             st.dataframe(df_preview.tail(5), use_container_width=True, hide_index=True)
         else:
             st.dataframe(df_preview, use_container_width=True, hide_index=True)
 
-# TAB 2: Generare Random
+# TAB 2: Generare Random & Calcul WIN
 with tab2:
-    st.markdown("## 🎲 Pas 2: Generează Variante Random")
+    st.markdown("## 🎲 Pas 2: Generează Variante Random & Calculează Performanța")
     
     if not st.session_state.variants:
-        st.warning("⚠️ Nu există variante încărcate! Mergi la tab-ul 'Încarcă Variante' pentru a adăuga variante.")
+        st.warning("⚠️ Nu există variante curățate încă! Mergi la tab-ul 'Încarcă Variante & Curăță'.")
     else:
-        col1, col2 = st.columns([2, 1])
+        # Secțiunea de Încărcare Runde
+        st.markdown("### 1. Încarcă Rundele (Extragerile) de Bază")
+        
+        col_rounds, col_rounds_info = st.columns([2, 1])
+        
+        with col_rounds:
+            rounds_file = st.file_uploader(
+                "Încărcați fișierul cu Rundele (extragerile)",
+                type=['txt', 'csv'],
+                key="rounds_uploader"
+            )
+
+        if rounds_file:
+            rounds_list, num_rounds = parse_rounds(rounds_file)
+            st.session_state.rounds = rounds_list
+            with col_rounds_info:
+                st.metric("Total Runde Încărcate", num_rounds)
+        
+        st.markdown("---")
+        
+        # Secțiunea de Generare Random
+        st.markdown("### 2. Generare Eșantion Aleatoriu")
+
+        col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
-            st.markdown(f"### Ai {len(st.session_state.variants)} variante disponibile")
+            st.markdown(f"Ai **{len(st.session_state.variants)}** variante unice disponibile.")
             
             count = st.number_input(
                 "Câte variante să generez?",
                 min_value=1,
                 max_value=len(st.session_state.variants),
-                value=min(100, len(st.session_state.variants)),
+                value=min(1165, len(st.session_state.variants)), # Valoare implicită 1165
                 step=1
             )
-            
-            st.caption(f"Poți genera între 1 și {len(st.session_state.variants)} variante")
         
         with col2:
             st.markdown("### ")
             st.markdown("### ")
-            if st.button("🎲 Generează Random", use_container_width=True, type="primary"):
-                with st.spinner(f"Se generează {count} variante random..."):
-                    # Progress bar
+            if st.button("🎲 Generează Random & Calculează", use_container_width=True, type="primary"):
+                with st.spinner(f"Se generează {count} variante random și se calculează scorul..."):
+                    
                     progress_bar = st.progress(0)
                     
-                    # Generare random fără duplicate
+                    # Generare random
                     indices = list(range(len(st.session_state.variants)))
                     random.shuffle(indices)
                     selected_indices = indices[:count]
                     
-                    # Simulare progres
-                    for i in range(100):
-                        time.sleep(0.01)
-                        progress_bar.progress(i + 1)
-                    
-                    st.session_state.generated_variants = [
+                    generated_variants = [
                         st.session_state.variants[i] for i in selected_indices
                     ]
+                    st.session_state.generated_variants = generated_variants
                     
-                    st.success(f"✅ S-au generat {len(st.session_state.generated_variants)} variante random!")
+                    # Calcul Score WIN
+                    if st.session_state.rounds:
+                        win_score = calculate_wins(generated_variants, st.session_state.rounds)
+                        st.session_state.win_score = win_score
+                        win_message = f"✅ S-au generat {len(generated_variants)} variante și s-au obținut **{win_score} WINs**!"
+                    else:
+                        st.session_state.win_score = 0
+                        win_message = f"✅ S-au generat {len(generated_variants)} variante. Încărcați rundele pentru a calcula scorul WIN."
+                    
+                    # Simulare progres
+                    for i in range(100):
+                        time.sleep(0.005)
+                        progress_bar.progress(i + 1)
+                    
+                    st.success(win_message)
                     st.balloons()
+        
+        with col3:
+            st.markdown("### ")
+            st.markdown("### ")
+            st.metric(
+                "Scor de Performanță (Win)", 
+                st.session_state.win_score
+            )
+
 
 # TAB 3: Rezultate
 with tab3:
     st.markdown("## 📊 Rezultate Generate")
     
     if not st.session_state.generated_variants:
-        st.info("ℹ️ Nu există rezultate generate încă. Mergi la tab-ul 'Generează Random' pentru a genera variante.")
+        st.info("ℹ️ Nu există rezultate generate încă. Mergi la tab-ul 'Generează Random & Calculează Win' pentru a genera variante.")
     else:
         # Statistici
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric(
-                "Variante Generate",
-                len(st.session_state.generated_variants),
-                delta=None
-            )
+            st.metric("Variante Generate", len(st.session_state.generated_variants))
         
         with col2:
-            st.metric(
-                "Din Total",
-                len(st.session_state.variants),
-                delta=None
-            )
+            st.metric("Din Total", len(st.session_state.variants))
         
         with col3:
-            percentage = (len(st.session_state.generated_variants) / len(st.session_state.variants)) * 100
-            st.metric(
-                "Procent",
-                f"{percentage:.1f}%",
-                delta=None
-            )
+            st.metric("Runde Folosite", len(st.session_state.rounds))
+
+        with col4:
+            st.metric("Scor WIN Obținut", st.session_state.win_score)
         
         st.markdown("---")
         
@@ -336,7 +489,7 @@ with tab3:
             )
         
         with col3:
-            if st.button("🔄 Generează Din Nou", use_container_width=True):
+            if st.button("🔄 Generează Din Nou (Revino la Tab 2)", use_container_width=True):
                 st.session_state.generated_variants = []
                 st.rerun()
         
@@ -347,7 +500,6 @@ with tab3:
         
         df_results = pd.DataFrame(st.session_state.generated_variants)
         
-        # Editor de date interactiv
         st.dataframe(
             df_results,
             use_container_width=True,
@@ -355,9 +507,8 @@ with tab3:
             height=400
         )
         
-        # Opțiune de filtrare
         with st.expander("🔍 Caută în rezultate"):
-            search_term = st.text_input("Caută după ID sau combinație")
+            search_term = st.text_input("Caută după ID sau combinație în rezultate")
             
             if search_term:
                 filtered = [
