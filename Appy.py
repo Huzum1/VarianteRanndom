@@ -43,8 +43,14 @@ st.markdown("""
     h2, h3 {
         color: #667eea !important;
     }
-    .stTextArea textarea {
-        font-family: 'Courier New', monospace;
+    /* Stil pentru chenarul cu rezultate (Noul chenar) */
+    .results-box {
+        border: 1px solid #667eea;
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #f0f2f6; /* Fundal mai deschis */
+        height: 400px; /* Înălțime fixă pentru scroll */
+        overflow-y: scroll; /* Activează derularea verticală */
     }
     </style>
 """, unsafe_allow_html=True)
@@ -64,38 +70,29 @@ if 'inter_duplicates' not in st.session_state:
     st.session_state.inter_duplicates = 0
 if 'rounds' not in st.session_state:
     st.session_state.rounds = []
-if 'rounds_raw' not in st.session_state: # NOU: Păstrează rundele ca set de numere pentru parsare ușoară
+if 'rounds_raw' not in st.session_state:
     st.session_state.rounds_raw = []
 if 'win_score' not in st.session_state:
     st.session_state.win_score = 0
-if 'round_performance_df' not in st.session_state: # NOU: DataFrame pentru performanța rundelor
-    st.session_state.round_performance_df = pd.DataFrame()
+if 'round_performance_text' not in st.session_state: # MODIFICAT: Text simplu pentru afișare
+    st.session_state.round_performance_text = ""
 
 
 def clean_variant_combination(numbers_str):
-    """
-    Curăță șirul de numere, asigură unicitatea (elimină duplicatele din aceeași variantă)
-    și le sortează. Returnează combinația curățată și numărul de duplicate eliminate.
-    """
+    """Curăță șirul de numere, asigură unicitatea și le sortează."""
     try:
         parts = [p.strip() for p in numbers_str.split() if p.strip().isdigit()]
         valid_numbers = [int(p) for p in parts]
-        
         unique_numbers = list(set(valid_numbers))
         unique_numbers.sort()
-        
         duplicates_removed = len(valid_numbers) - len(unique_numbers)
         cleaned_combination = ' '.join(map(str, unique_numbers))
-        
         return cleaned_combination, duplicates_removed
-        
     except:
         return numbers_str, 0
 
 def parse_variants(text):
-    """
-    Parse variantele din text, curățând duplicatele din interiorul fiecărei combinații.
-    """
+    """Parse variantele din text, curățând duplicatele."""
     variants = []
     errors = []
     total_internal_duplicates_removed = 0
@@ -105,19 +102,16 @@ def parse_variants(text):
         line = line.strip()
         if not line:
             continue
-            
         parts = line.split(',', 1)
         if len(parts) != 2:
             errors.append(f"Linia {i}: Format invalid (lipsește virgula)")
             continue
-        
         variant_id = parts[0].strip()
         numbers = parts[1].strip()
         
         if not variant_id:
             errors.append(f"Linia {i}: ID lipsă")
             continue
-        
         if not numbers:
             errors.append(f"Linia {i}: Combinație lipsă")
             continue
@@ -129,20 +123,13 @@ def parse_variants(text):
             errors.append(f"Linia {i}: Combinația '{numbers}' are sub 4 numere unice după curățare.")
             continue
 
-        variants.append({
-            'id': variant_id,
-            'combination': cleaned_combination
-        })
+        variants.append({'id': variant_id, 'combination': cleaned_combination})
     
-    # Etapa finală: Elimină duplicatele între variante
     df = pd.DataFrame(variants)
     if not df.empty:
         df_unique = df.drop_duplicates(subset=['combination']).reset_index(drop=True)
-        # Reatribuie ID-urile serial
         df_unique['id'] = (df_unique.index + 1).astype(str)
-        
         final_variants = df_unique.to_dict('records')
-        
         total_inter_duplicates_removed = len(variants) - len(final_variants)
     else:
         final_variants = []
@@ -152,7 +139,7 @@ def parse_variants(text):
 
 @st.cache_data
 def parse_rounds(rounds_file):
-    """Procesează fișierul de runde și returnează o listă de seturi (runda) și o listă de string-uri (afisare)."""
+    """Procesează fișierul de runde și returnează o listă de seturi (pentru calcul) și o listă de string-uri (pentru afișare)."""
     if rounds_file is None:
         return [], []
     
@@ -168,7 +155,6 @@ def parse_rounds(rounds_file):
             
             if len(round_numbers) >= 4:
                 rounds_set_list.append(round_numbers)
-                # Formatează numerele pentru afișare (sortate)
                 display_numbers = ' '.join(map(str, sorted(list(round_numbers))))
                 rounds_display_list.append(display_numbers)
                 
@@ -178,7 +164,7 @@ def parse_rounds(rounds_file):
         return [], []
 
 def calculate_wins(generated_variants, rounds):
-    """Calculează numărul total de potriviri (4/4, 5/5, etc.)."""
+    """Calculează numărul total de potriviri."""
     if not rounds or not generated_variants:
         return 0
     
@@ -186,8 +172,7 @@ def calculate_wins(generated_variants, rounds):
     
     for variant_data in generated_variants:
         try:
-            variant_numbers_list = [int(n) for n in variant_data['combination'].split() if n.isdigit()]
-            variant_set = set(variant_numbers_list)
+            variant_set = set(int(n) for n in variant_data['combination'].split() if n.isdigit())
         except:
             continue
         
@@ -197,13 +182,13 @@ def calculate_wins(generated_variants, rounds):
                 
     return total_wins
 
-def analyze_round_performance(generated_variants, rounds_set, rounds_display):
+def analyze_round_performance(generated_variants, rounds_set):
     """
-    NOU: Calculează performanța fiecărei runde individuale pe baza variantelor generate.
-    Returnează un DataFrame cu Runda și Scor.
+    MODIFICAT: Calculează performanța pe rundă și returnează un string mare,
+    formatat conform cerinței: "Runda X - Y variante câștigătoare".
     """
     if not rounds_set or not generated_variants:
-        return pd.DataFrame({'Runda': rounds_display, 'WINs': [0] * len(rounds_display)})
+        return ""
 
     variant_sets = []
     for variant_data in generated_variants:
@@ -213,31 +198,19 @@ def analyze_round_performance(generated_variants, rounds_set, rounds_display):
             continue
 
     if not variant_sets:
-         return pd.DataFrame({'Runda': rounds_display, 'WINs': [0] * len(rounds_display)})
+         return ""
 
-    performance_data = []
+    results_lines = []
     for i, runda_set in enumerate(rounds_set):
         wins_in_round = 0
         for v_set in variant_sets:
-            # Dacă toate numerele din varianta generată se regăsesc în rundă
             if v_set.issubset(runda_set):
                 wins_in_round += 1
         
-        round_name = f"Runda {i+1}"
-        round_display_str = f"({rounds_display[i]})"
-        
         # Formatul cerut: Runda 1 - 3 variante câștigătoare
-        win_label = f" - {wins_in_round} variante câștigătoare"
+        results_lines.append(f"Runda {i+1} - {wins_in_round} variante câștigătoare")
         
-        performance_data.append({
-            'ID': i + 1,
-            'Runda': round_name,
-            'Numere': round_display_str,
-            'WINs': wins_in_round,
-            'Rezultat': round_name + win_label
-        })
-        
-    return pd.DataFrame(performance_data)
+    return '\n'.join(results_lines)
 
 
 def generate_sample_data(count=100):
@@ -293,13 +266,13 @@ with st.sidebar:
         st.session_state.rounds = []
         st.session_state.rounds_raw = []
         st.session_state.win_score = 0
-        st.session_state.round_performance_df = pd.DataFrame()
+        st.session_state.round_performance_text = ""
         st.rerun()
 
 # Tabs principale
 tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante & Curăță", "🎲 Generează Random & Calculează Win", "📊 Rezultate"])
 
-# TAB 1: Încărcare Variante (Păstrat neschimbat)
+# TAB 1: Încărcare Variante
 with tab1:
     st.markdown("## 📝 Pas 1: Încarcă Variantele Tale & Curăță Duplicatele")
     
@@ -431,42 +404,25 @@ with tab2:
         
         
         # -------------------------------------------------------------------------
-        # Secțiunea 2: Previzualizare Runde ȘI Performanță
+        # Secțiunea 2: Previzualizare Runde ȘI Performanță (SIMPLIFICAT)
         # -------------------------------------------------------------------------
-        if st.session_state.rounds_raw and not st.session_state.round_performance_df.empty:
+        if st.session_state.rounds_raw and st.session_state.round_performance_text:
             
-            st.markdown("#### 🎯 Previzualizare Performanță Runde (WINs pe runda)")
+            st.markdown("#### 🎯 Performanța Eșantionului pe Rundă")
             
-            df_perf = st.session_state.round_performance_df
-            
-            # Afișează doar coloanele relevante
-            df_display = df_perf[['Runda', 'Numere', 'Rezultat']].rename(columns={'Rezultat': 'Analiză WIN'})
-            
-            # 1. Afișează primele 10 rânduri (Preview)
-            st.dataframe(
-                df_display.head(10),
-                use_container_width=True,
-                hide_index=True,
-                height=370
+            # Utilizează un container cu CSS pentru a obține chenarul scrollabil
+            st.markdown(
+                f'<div class="results-box"><pre style="background:none; border:none; margin:0;">{st.session_state.round_performance_text}</pre></div>',
+                unsafe_allow_html=True
             )
-
-            # 2. Buton pentru afișarea completă (cu scroll)
-            if len(df_perf) > 10:
-                if st.button(f"Vizualizează Toate Rundele ({len(df_perf)})", use_container_width=True):
-                    with st.expander("Lista completă de Runde și Scoruri", expanded=True):
-                        st.dataframe(
-                            df_display,
-                            use_container_width=True,
-                            hide_index=True,
-                            height=600 # Limită înălțimea pentru a permite scroll
-                        )
-
-        st.markdown("---")
+            st.markdown("---")
+        elif st.session_state.rounds_raw and not st.session_state.round_performance_text:
+             st.info("Încarcă și Generează Variante pentru a vedea Performanța pe Rundă.")
         
         # -------------------------------------------------------------------------
         # Secțiunea 3: Generare Random & Calcul
         # -------------------------------------------------------------------------
-        st.markdown("### 3. Generare Eșantion Aleatoriu & Calcul Score")
+        st.markdown("### 2. Generare Eșantion Aleatoriu & Calcul Score")
 
         col1, col2, col3 = st.columns([2, 1, 1])
         
@@ -508,13 +464,12 @@ with tab2:
                         win_score = calculate_wins(generated_variants, st.session_state.rounds)
                         st.session_state.win_score = win_score
                         
-                        # Calcul Performanță pe Rundă (DataFrame)
-                        df_perf = analyze_round_performance(
+                        # Calcul Performanță pe Rundă (Text simplificat)
+                        performance_text = analyze_round_performance(
                             generated_variants, 
-                            st.session_state.rounds, 
-                            st.session_state.rounds_raw
+                            st.session_state.rounds
                         )
-                        st.session_state.round_performance_df = df_perf
+                        st.session_state.round_performance_text = performance_text
                         
                         win_message = f"✅ S-au generat {len(generated_variants)} variante și s-au obținut **{win_score} WINs**!"
                         
@@ -525,7 +480,7 @@ with tab2:
                         
                         st.success(win_message)
                         st.balloons()
-                        st.rerun() # Re-rulează pentru a afișa imediat previzualizarea rundelor
+                        st.rerun() # Re-rulează pentru a afișa imediat rezultatele în chenar
         
         with col3:
             st.markdown("### ")
@@ -536,7 +491,7 @@ with tab2:
             )
 
 
-# TAB 3: Rezultate (Păstrat neschimbat)
+# TAB 3: Rezultate
 with tab3:
     st.markdown("## 📊 Rezultate Generate")
     
