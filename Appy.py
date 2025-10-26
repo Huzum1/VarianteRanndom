@@ -16,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS personalizat (MODIFICAT pentru a asigura vizibilitatea textului în chenarul de rezultate)
+# CSS personalizat
 st.markdown("""
     <style>
     /* Fundalul general al aplicației */
@@ -83,13 +83,15 @@ if 'internal_duplicates' not in st.session_state:
 if 'inter_duplicates' not in st.session_state:
     st.session_state.inter_duplicates = 0
 if 'rounds' not in st.session_state:
-    st.session_state.rounds = []
+    st.session_state.rounds = [] # Liste de seturi (pentru calcul)
 if 'rounds_raw' not in st.session_state:
-    st.session_state.rounds_raw = []
+    st.session_state.rounds_raw = [] # Liste de string-uri (pentru display)
 if 'win_score' not in st.session_state:
     st.session_state.win_score = 0
 if 'round_performance_text' not in st.session_state:
     st.session_state.round_performance_text = ""
+if 'manual_rounds_input' not in st.session_state:
+    st.session_state.manual_rounds_input = ""
 
 
 def clean_variant_combination(numbers_str):
@@ -151,32 +153,37 @@ def parse_variants(text):
     
     return final_variants, errors, total_internal_duplicates_removed, total_inter_duplicates_removed
 
-@st.cache_data
-def parse_rounds(rounds_file):
-    """Procesează fișierul de runde și returnează o listă de seturi (pentru calcul) și o listă de string-uri (pentru afișare)."""
-    if rounds_file is None:
-        return [], []
-    
+def process_round_text(text):
+    """Funcție utilitară pentru a procesa textul rundelor (din fișier sau manual)."""
     rounds_set_list = []
     rounds_display_list = []
     
-    try:
-        # Folosim StringIO pentru a citi fișierul fără a reseta pointerul la fiecare apel
-        content = rounds_file.getvalue().decode("utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Extrage numerele
+        parts = [p.strip() for p in line.replace(',', ' ').split() if p.strip().isdigit()]
+        round_numbers = {int(p) for p in parts if p.isdigit()} 
         
-        for line in content.splitlines():
-            # Extrage numerele
-            parts = [p.strip() for p in line.replace(',', ' ').split() if p.strip().isdigit()]
-            round_numbers = {int(p) for p in parts if p.isdigit()} 
+        if len(round_numbers) >= 4:
+            rounds_set_list.append(round_numbers)
+            display_numbers = ' '.join(map(str, sorted(list(round_numbers))))
+            rounds_display_list.append(display_numbers)
             
-            if len(round_numbers) >= 4:
-                rounds_set_list.append(round_numbers)
-                display_numbers = ' '.join(map(str, sorted(list(round_numbers))))
-                rounds_display_list.append(display_numbers)
-                
-        return rounds_set_list, rounds_display_list
+    return rounds_set_list, rounds_display_list
+
+@st.cache_data
+def parse_rounds_file(rounds_file):
+    """Procesează fișierul de runde (folosește cache)."""
+    if rounds_file is None:
+        return [], []
+    
+    try:
+        content = rounds_file.getvalue().decode("utf-8")
+        return process_round_text(content)
     except Exception as e:
-        st.error(f"Eroare la procesarea rundelor: {e}")
+        st.error(f"Eroare la procesarea fișierului de runde: {e}")
         return [], []
 
 def calculate_wins(generated_variants, rounds):
@@ -223,11 +230,9 @@ def analyze_round_performance(generated_variants, rounds_set):
             if v_set.issubset(runda_set):
                 wins_in_round += 1
         
-        # Formatul cerut: Runda 1 - 3 variante câștigătoare
         results_lines.append(f"Runda {i+1} - {wins_in_round} variante câștigătoare")
         
     return '\n'.join(results_lines)
-
 
 def generate_sample_data(count=100):
     """Generează date de exemplu, incluzând DUPLICATE PENTRU TESTARE"""
@@ -283,6 +288,7 @@ with st.sidebar:
         st.session_state.rounds_raw = []
         st.session_state.win_score = 0
         st.session_state.round_performance_text = ""
+        st.session_state.manual_rounds_input = ""
         st.rerun()
 
 # Tabs principale
@@ -388,7 +394,7 @@ with tab1:
         else:
             st.dataframe(df_preview, use_container_width=True, hide_index=True)
 
-# TAB 2: Generare Random & Calcul WIN (MODIFICATĂ AFIȘAREA)
+# TAB 2: Generare Random & Calcul WIN
 with tab2:
     st.markdown("## 🎲 Pas 2: Generează Variante Random & Calculează Performanța")
     
@@ -401,32 +407,53 @@ with tab2:
         # -------------------------------------------------------------------------
         st.markdown("### 1. Încarcă Rundele (Extragerile) de Bază")
         
-        col_rounds, col_rounds_info = st.columns([2, 1])
+        col_file, col_manual = st.columns(2)
         
-        rounds_file = col_rounds.file_uploader(
+        # Opțiunea 1: Încărcare din fișier
+        rounds_file = col_file.file_uploader(
             "Încărcați fișierul cu Rundele (extragerile)",
             type=['txt', 'csv'],
             key="rounds_uploader"
         )
 
-        if rounds_file:
-            rounds_set_list, rounds_display_list = parse_rounds(rounds_file)
-            st.session_state.rounds = rounds_set_list
-            st.session_state.rounds_raw = rounds_display_list
+        # Opțiunea 2: Adăugare manuală (NOU)
+        manual_rounds_input = col_manual.text_area(
+            "Sau adaugă runde manual (câte o rundă pe linie, numere separate prin spațiu sau virgulă)",
+            value=st.session_state.manual_rounds_input,
+            height=100,
+            placeholder="Exemplu:\n1 5 7 12 44 49\n2 10 20 30 40 45"
+        )
+        st.session_state.manual_rounds_input = manual_rounds_input
+        
+        # Procesarea datelor încărcate (ambele surse)
+        rounds_from_file_set, rounds_from_file_raw = parse_rounds_file(rounds_file)
+        rounds_from_manual_set, rounds_from_manual_raw = process_round_text(manual_rounds_input)
+
+        # Combinarea rundelor, eliminând duplicatele (după setul de numere)
+        all_rounds_set_dict = {}
+        
+        # Adaugă rundele din fișier
+        for r_set, r_raw in zip(rounds_from_file_set, rounds_from_file_raw):
+            all_rounds_set_dict[frozenset(r_set)] = r_raw
             
-            with col_rounds_info:
-                st.metric("Total Runde Încărcate", len(st.session_state.rounds))
+        # Adaugă rundele manuale (vor suprascrie dacă sunt identice cu cele din fișier)
+        for r_set, r_raw in zip(rounds_from_manual_set, rounds_from_manual_raw):
+            all_rounds_set_dict[frozenset(r_set)] = r_raw
+            
+        st.session_state.rounds = list(all_rounds_set_dict.keys())
+        st.session_state.rounds_raw = list(all_rounds_set_dict.values())
+        
+        st.metric("Total Runde Unice Încărcate", len(st.session_state.rounds))
         
         
         # -------------------------------------------------------------------------
-        # Secțiunea 2: Previzualizare Runde ȘI Performanță (SIMPLIFICAT)
+        # Secțiunea 2: Previzualizare Runde ȘI Performanță
         # -------------------------------------------------------------------------
         if st.session_state.rounds_raw and st.session_state.round_performance_text:
             
             st.markdown("#### 🎯 Performanța Eșantionului pe Rundă")
             
             # Afișează numerele de WINs direct în chenarul cu stilul corect
-            # Am înlocuit <pre> cu <p> în CSS și aici pentru un aspect mai curat
             performance_html = '<br>'.join([f"<p>{line}</p>" for line in st.session_state.round_performance_text.split('\n')])
             
             st.markdown(
@@ -461,7 +488,7 @@ with tab2:
             if st.button("🎲 Generează Random & Calculează", use_container_width=True, type="primary"):
                 
                 if not st.session_state.rounds:
-                    st.warning("Vă rugăm să încărcați rundele mai întâi.")
+                    st.warning("Vă rugăm să încărcați sau să introduceți runde mai întâi.")
                 
                 else:
                     with st.spinner(f"Se generează {count} variante random și se calculează scorul..."):
