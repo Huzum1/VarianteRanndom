@@ -16,15 +16,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS personalizat
+# CSS personalizat (MODIFICAT pentru a asigura vizibilitatea textului în chenarul de rezultate)
 st.markdown("""
     <style>
+    /* Fundalul general al aplicației */
     .main {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     }
     .stApp {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     }
+    /* Dimensiunea și culoarea metricilor */
     div[data-testid="stMetricValue"] {
         font-size: 2.5rem;
         color: #667eea;
@@ -32,6 +34,7 @@ st.markdown("""
     .css-1d391kg {
         padding: 2rem 1rem;
     }
+    /* Titluri H1 */
     h1 {
         color: white !important;
         text-align: center;
@@ -40,17 +43,28 @@ st.markdown("""
         border-radius: 10px;
         margin-bottom: 2rem;
     }
+    /* Titluri H2, H3 */
     h2, h3 {
         color: #667eea !important;
     }
-    /* Stil pentru chenarul cu rezultate (Noul chenar) */
+    .stTextArea textarea {
+        font-family: 'Courier New', monospace;
+    }
+    /* Stil pentru chenarul cu rezultate (MODIFICAT PENTRU VIZIBILITATE) */
     .results-box {
-        border: 1px solid #667eea;
-        padding: 10px;
-        border-radius: 5px;
-        background-color: #f0f2f6; /* Fundal mai deschis */
-        height: 400px; /* Înălțime fixă pentru scroll */
-        overflow-y: scroll; /* Activează derularea verticală */
+        border: 1px solid #764ba2;
+        padding: 15px;
+        border-radius: 8px;
+        /* Asigură contrastul: fundal întunecat, text deschis */
+        background-color: #333333; 
+        color: white; 
+        height: 400px; 
+        overflow-y: scroll;
+        font-family: monospace; /* Font mono pentru lizibilitate */
+    }
+    .results-box p {
+        color: white; /* Asigură că paragrafele din chenar sunt albe */
+        margin: 5px 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -74,7 +88,7 @@ if 'rounds_raw' not in st.session_state:
     st.session_state.rounds_raw = []
 if 'win_score' not in st.session_state:
     st.session_state.win_score = 0
-if 'round_performance_text' not in st.session_state: # MODIFICAT: Text simplu pentru afișare
+if 'round_performance_text' not in st.session_state:
     st.session_state.round_performance_text = ""
 
 
@@ -147,9 +161,11 @@ def parse_rounds(rounds_file):
     rounds_display_list = []
     
     try:
+        # Folosim StringIO pentru a citi fișierul fără a reseta pointerul la fiecare apel
         content = rounds_file.getvalue().decode("utf-8")
         
         for line in content.splitlines():
+            # Extrage numerele
             parts = [p.strip() for p in line.replace(',', ' ').split() if p.strip().isdigit()]
             round_numbers = {int(p) for p in parts if p.isdigit()} 
             
@@ -184,8 +200,8 @@ def calculate_wins(generated_variants, rounds):
 
 def analyze_round_performance(generated_variants, rounds_set):
     """
-    MODIFICAT: Calculează performanța pe rundă și returnează un string mare,
-    formatat conform cerinței: "Runda X - Y variante câștigătoare".
+    Calculează performanța pe rundă și returnează un string mare,
+    formatat: "Runda X - Y variante câștigătoare".
     """
     if not rounds_set or not generated_variants:
         return ""
@@ -372,7 +388,7 @@ with tab1:
         else:
             st.dataframe(df_preview, use_container_width=True, hide_index=True)
 
-# TAB 2: Generare Random & Calcul WIN (Modificat)
+# TAB 2: Generare Random & Calcul WIN (MODIFICATĂ AFIȘAREA)
 with tab2:
     st.markdown("## 🎲 Pas 2: Generează Variante Random & Calculează Performanța")
     
@@ -387,12 +403,11 @@ with tab2:
         
         col_rounds, col_rounds_info = st.columns([2, 1])
         
-        with col_rounds:
-            rounds_file = st.file_uploader(
-                "Încărcați fișierul cu Rundele (extragerile)",
-                type=['txt', 'csv'],
-                key="rounds_uploader"
-            )
+        rounds_file = col_rounds.file_uploader(
+            "Încărcați fișierul cu Rundele (extragerile)",
+            type=['txt', 'csv'],
+            key="rounds_uploader"
+        )
 
         if rounds_file:
             rounds_set_list, rounds_display_list = parse_rounds(rounds_file)
@@ -410,14 +425,17 @@ with tab2:
             
             st.markdown("#### 🎯 Performanța Eșantionului pe Rundă")
             
-            # Utilizează un container cu CSS pentru a obține chenarul scrollabil
+            # Afișează numerele de WINs direct în chenarul cu stilul corect
+            # Am înlocuit <pre> cu <p> în CSS și aici pentru un aspect mai curat
+            performance_html = '<br>'.join([f"<p>{line}</p>" for line in st.session_state.round_performance_text.split('\n')])
+            
             st.markdown(
-                f'<div class="results-box"><pre style="background:none; border:none; margin:0;">{st.session_state.round_performance_text}</pre></div>',
+                f'<div class="results-box">{performance_html}</div>',
                 unsafe_allow_html=True
             )
             st.markdown("---")
-        elif st.session_state.rounds_raw and not st.session_state.round_performance_text:
-             st.info("Încarcă și Generează Variante pentru a vedea Performanța pe Rundă.")
+        elif st.session_state.rounds_raw and not st.session_state.generated_variants:
+             st.info("Încarcă și Generează Variante (Pasul 2) pentru a vedea Performanța pe Rundă.")
         
         # -------------------------------------------------------------------------
         # Secțiunea 3: Generare Random & Calcul
@@ -480,7 +498,7 @@ with tab2:
                         
                         st.success(win_message)
                         st.balloons()
-                        st.rerun() # Re-rulează pentru a afișa imediat rezultatele în chenar
+                        st.rerun() 
         
         with col3:
             st.markdown("### ")
