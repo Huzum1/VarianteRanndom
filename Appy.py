@@ -50,7 +50,7 @@ st.markdown("""
     .stTextArea textarea {
         font-family: 'Courier New', monospace;
     }
-    /* Stil pentru chenarul cu rezultate (MODIFICAT PENTRU VIZIBILITATE) */
+    /* Stil pentru chenarul cu rezultate */
     .results-box {
         border: 1px solid #764ba2;
         padding: 15px;
@@ -83,15 +83,17 @@ if 'internal_duplicates' not in st.session_state:
 if 'inter_duplicates' not in st.session_state:
     st.session_state.inter_duplicates = 0
 if 'rounds' not in st.session_state:
-    st.session_state.rounds = [] # Liste de seturi (pentru calcul)
+    st.session_state.rounds = []
 if 'rounds_raw' not in st.session_state:
-    st.session_state.rounds_raw = [] # Liste de string-uri (pentru display)
+    st.session_state.rounds_raw = []
 if 'win_score' not in st.session_state:
     st.session_state.win_score = 0
 if 'round_performance_text' not in st.session_state:
     st.session_state.round_performance_text = ""
 if 'manual_rounds_input' not in st.session_state:
     st.session_state.manual_rounds_input = ""
+if 'optimization_attempts' not in st.session_state: # NOU: Contor de încercări pentru optimizare
+    st.session_state.optimization_attempts = 0
 
 
 def clean_variant_combination(numbers_str):
@@ -200,6 +202,7 @@ def calculate_wins(generated_variants, rounds):
             continue
         
         for runda in rounds:
+            # Dacă toate numerele din varianta generată (set) sunt un subset al rundei (set)
             if variant_set.issubset(runda):
                 total_wins += 1
                 
@@ -233,6 +236,7 @@ def analyze_round_performance(generated_variants, rounds_set):
         results_lines.append(f"Runda {i+1} - {wins_in_round} variante câștigătoare")
         
     return '\n'.join(results_lines)
+
 
 def generate_sample_data(count=100):
     """Generează date de exemplu, incluzând DUPLICATE PENTRU TESTARE"""
@@ -269,6 +273,8 @@ with st.sidebar:
     st.metric("Variante Generate", len(st.session_state.generated_variants))
     st.metric("Runde Încărcate", len(st.session_state.rounds_raw))
     st.metric("Scor Win Total", st.session_state.win_score)
+    if st.session_state.optimization_attempts > 0:
+         st.metric("Încercări Optimizare", st.session_state.optimization_attempts)
     st.markdown("---")
     st.markdown("## 🧹 Duplicate Eliminate")
     st.metric("În Combinații (Interne)", st.session_state.internal_duplicates)
@@ -289,6 +295,7 @@ with st.sidebar:
         st.session_state.win_score = 0
         st.session_state.round_performance_text = ""
         st.session_state.manual_rounds_input = ""
+        st.session_state.optimization_attempts = 0
         st.rerun()
 
 # Tabs principale
@@ -416,7 +423,7 @@ with tab2:
             key="rounds_uploader"
         )
 
-        # Opțiunea 2: Adăugare manuală (NOU)
+        # Opțiunea 2: Adăugare manuală
         manual_rounds_input = col_manual.text_area(
             "Sau adaugă runde manual (câte o rundă pe linie, numere separate prin spațiu sau virgulă)",
             value=st.session_state.manual_rounds_input,
@@ -425,18 +432,13 @@ with tab2:
         )
         st.session_state.manual_rounds_input = manual_rounds_input
         
-        # Procesarea datelor încărcate (ambele surse)
+        # Procesarea și combinarea rundelor
         rounds_from_file_set, rounds_from_file_raw = parse_rounds_file(rounds_file)
         rounds_from_manual_set, rounds_from_manual_raw = process_round_text(manual_rounds_input)
 
-        # Combinarea rundelor, eliminând duplicatele (după setul de numere)
         all_rounds_set_dict = {}
-        
-        # Adaugă rundele din fișier
         for r_set, r_raw in zip(rounds_from_file_set, rounds_from_file_raw):
             all_rounds_set_dict[frozenset(r_set)] = r_raw
-            
-        # Adaugă rundele manuale (vor suprascrie dacă sunt identice cu cele din fișier)
         for r_set, r_raw in zip(rounds_from_manual_set, rounds_from_manual_raw):
             all_rounds_set_dict[frozenset(r_set)] = r_raw
             
@@ -453,7 +455,6 @@ with tab2:
             
             st.markdown("#### 🎯 Performanța Eșantionului pe Rundă")
             
-            # Afișează numerele de WINs direct în chenarul cu stilul corect
             performance_html = '<br>'.join([f"<p>{line}</p>" for line in st.session_state.round_performance_text.split('\n')])
             
             st.markdown(
@@ -469,71 +470,122 @@ with tab2:
         # -------------------------------------------------------------------------
         st.markdown("### 2. Generare Eșantion Aleatoriu & Calcul Score")
 
-        col1, col2, col3 = st.columns([2, 1, 1])
+        col_count, col_mode = st.columns([1, 1])
         
-        with col1:
+        with col_count:
             st.markdown(f"Ai **{len(st.session_state.variants)}** variante unice disponibile.")
             
             count = st.number_input(
-                "Câte variante să generez?",
+                "Câte variante să generez pe eșantion?",
                 min_value=1,
                 max_value=len(st.session_state.variants),
                 value=min(1165, len(st.session_state.variants)),
                 step=1
             )
         
-        with col2:
+        with col_mode:
+            st.markdown("#### Mod Generare")
+            
+            # Opțiunea NOUĂ de Optimizare
+            optimize_mode = st.checkbox(
+                "Mod Generare Optimă (Targeted WINs)",
+                help="Rulează automat generarea random până atinge scorul WIN țintă."
+            )
+            
+            target_wins_plus = st.number_input(
+                "WINs Țintă Suplimentare (+X)",
+                min_value=0,
+                value=10,
+                step=1,
+                disabled=not optimize_mode,
+                help="Scorul țintă va fi: (Runde totale) + X"
+            )
+
+        
+        col_button, col_metric = st.columns(2)
+        
+        with col_metric:
+            st.markdown("### ")
+            st.metric("Scor de Performanță Total", st.session_state.win_score)
+
+        with col_button:
             st.markdown("### ")
             st.markdown("### ")
-            if st.button("🎲 Generează Random & Calculează", use_container_width=True, type="primary"):
+            if st.button("🎲 Generează & Calculează", use_container_width=True, type="primary"):
                 
                 if not st.session_state.rounds:
-                    st.warning("Vă rugăm să încărcați sau să introduceți runde mai întâi.")
+                    st.error("Vă rugăm să încărcați sau să introduceți runde mai întâi.")
+                    st.session_state.optimization_attempts = 0
                 
                 else:
-                    with st.spinner(f"Se generează {count} variante random și se calculează scorul..."):
+                    total_rounds = len(st.session_state.rounds)
+                    target_win_score = total_rounds + target_wins_plus
+                    attempts = 0
+                    best_score = -1
+                    best_variants = []
+                    
+                    if optimize_mode:
+                        st.info(f"Target stabilit: {total_rounds} Runde + {target_wins_plus} WINs = **{target_win_score} WINs**.")
                         
-                        progress_bar = st.progress(0)
+                        # Generare Optimă (Buclă WHILE)
+                        with st.spinner(f"Se caută eșantionul cu cel puțin {target_win_score} WINs..."):
+                            
+                            while best_score < target_win_score:
+                                attempts += 1
+                                
+                                # Simulare extragere random
+                                indices = list(range(len(st.session_state.variants)))
+                                random.shuffle(indices)
+                                current_variants = [st.session_state.variants[i] for i in indices[:count]]
+                                
+                                current_score = calculate_wins(current_variants, st.session_state.rounds)
+                                
+                                if current_score > best_score:
+                                    best_score = current_score
+                                    best_variants = current_variants
+                                
+                                # Feedback în timpul buclei
+                                if attempts % 50 == 0:
+                                    st.caption(f"Încercări: {attempts}. Cel mai bun scor până acum: {best_score} WINs.")
+                                
+                                if attempts > 5000: # Limitare pentru a evita blocarea aplicației în cazuri improbabile
+                                    st.warning(f"Atenție: S-au efectuat {attempts} încercări fără a atinge ținta de {target_win_score} WINs. Se oprește la cel mai bun rezultat obținut ({best_score} WINs).")
+                                    break
                         
-                        # Generare random
-                        indices = list(range(len(st.session_state.variants)))
-                        random.shuffle(indices)
-                        selected_indices = indices[:count]
+                        st.session_state.optimization_attempts = attempts
+                        generated_variants = best_variants
+                        win_score = best_score
+                        win_message = f"🏆 Optimizare reușită după **{attempts}** încercări! S-au obținut **{win_score} WINs** (Ținta: {target_win_score})."
                         
-                        generated_variants = [
-                            st.session_state.variants[i] for i in selected_indices
-                        ]
-                        st.session_state.generated_variants = generated_variants
+                    else:
+                        # Generare Simplă (O singură rulare)
+                        with st.spinner(f"Se generează {count} variante random și se calculează scorul..."):
+                            
+                            indices = list(range(len(st.session_state.variants)))
+                            random.shuffle(indices)
+                            generated_variants = [st.session_state.variants[i] for i in indices[:count]]
+                            
+                            win_score = calculate_wins(generated_variants, st.session_state.rounds)
+                            st.session_state.optimization_attempts = 0 
+                            win_message = f"✅ S-au generat {len(generated_variants)} variante și s-au obținut **{win_score} WINs**!"
+
+
+                    # Actualizarea Session State
+                    st.session_state.generated_variants = generated_variants
+                    st.session_state.win_score = win_score
+                    
+                    performance_text = analyze_round_performance(generated_variants, st.session_state.rounds)
+                    st.session_state.round_performance_text = performance_text
                         
-                        # Calcul Score WIN Total
-                        win_score = calculate_wins(generated_variants, st.session_state.rounds)
-                        st.session_state.win_score = win_score
-                        
-                        # Calcul Performanță pe Rundă (Text simplificat)
-                        performance_text = analyze_round_performance(
-                            generated_variants, 
-                            st.session_state.rounds
-                        )
-                        st.session_state.round_performance_text = performance_text
-                        
-                        win_message = f"✅ S-au generat {len(generated_variants)} variante și s-au obținut **{win_score} WINs**!"
-                        
-                        # Simulare progres
-                        for i in range(100):
-                            time.sleep(0.005)
-                            progress_bar.progress(i + 1)
-                        
-                        st.success(win_message)
-                        st.balloons()
-                        st.rerun() 
+                    st.success(win_message)
+                    st.balloons()
+                    st.rerun() 
         
-        with col3:
-            st.markdown("### ")
-            st.markdown("### ")
-            st.metric(
-                "Scor de Performanță Total", 
-                st.session_state.win_score
-            )
+        # -------------------------------------------------------------------------
+        # Secțiunea 4: Afișare Contor Încercări (dacă a rulat optimizarea)
+        # -------------------------------------------------------------------------
+        if st.session_state.optimization_attempts > 0:
+             st.info(f"Ultima rulare în Mod Optimă a necesitat **{st.session_state.optimization_attempts}** încercări.")
 
 
 # TAB 3: Rezultate
