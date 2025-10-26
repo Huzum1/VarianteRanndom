@@ -50,37 +50,32 @@ st.markdown("""
     .stTextArea textarea {
         font-family: 'Courier New', monospace;
     }
-    /* Stil pentru chenarul cu rezultate */
+    /* Stil pentru chenarul cu rezultate (Performanță Rundă) */
     .results-box {
         border: 1px solid #764ba2;
         padding: 15px;
         border-radius: 8px;
-        /* Asigură contrastul: fundal întunecat, text deschis */
         background-color: #333333; 
         color: white; 
         height: 400px; 
         overflow-y: scroll;
-        font-family: monospace; /* Font mono pentru lizibilitate */
+        font-family: monospace; 
     }
     .results-box p {
-        color: white; /* Asigură că paragrafele din chenar sunt albe */
+        color: white; 
         margin: 5px 0;
     }
-    /* Stil pentru chenarul de log în timpul optimizării */
-    .log-box {
+    /* NOU: Stil pentru chenarul de status compact în timpul optimizării */
+    .status-box {
         border: 2px solid #667eea;
         padding: 10px;
         border-radius: 8px;
-        background-color: #f0f2f6; /* Fundal deschis pentru contrast cu textul întunecat */
+        background-color: #f0f2f6; 
         color: #333333;
-        height: 200px; 
-        overflow-y: scroll;
-        font-family: monospace;
-    }
-    .log-box p {
-        color: #333333;
-        margin: 0;
-        font-size: 0.85rem;
+        font-size: 1.1rem;
+        font-weight: bold;
+        text-align: center;
+        margin-top: 10px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -543,11 +538,8 @@ with tab2:
                     if optimize_mode:
                         st.info(f"Target stabilit: {total_rounds} Runde + {target_wins_plus} WINs = **{target_win_score} WINs**.")
                         
-                        # Chenar dedicat pentru log (actualizare în timp real)
-                        st.markdown("#### ⏳ Log Optimizare (Ultimele 10 Încercări)")
-                        log_container = st.container()
-                        
-                        last_10_attempts_log = []
+                        # NOU: Placeholder pentru afișarea statusului compact
+                        status_placeholder = st.empty() 
                         
                         # Generare Optimă (Buclă WHILE - Fără Limită de Încercări)
                         with st.spinner(f"Se caută eșantionul cu cel puțin {target_win_score} WINs..."):
@@ -566,8 +558,150 @@ with tab2:
                                 if current_score > best_score:
                                     best_score = current_score
                                     best_variants = current_variants
-                                    log_entry = f"**{time.strftime('%H:%M:%S')}** | **Încercare {attempts:,}:** NOU Cel Mai Bun Scor: **{best_score} WINs**"
-                                else:
-                                    log_entry = f"{time.strftime('%H:%M:%S')} | Încercare {attempts:,}: Scor Curent: {current_score} WINs"
 
-                                # Adaugă log-ul și păstrează doar ultime
+                                # Actualizare chenar la fiecare 50 de încercări
+                                if attempts % 50 == 0 or current_score >= target_win_score:
+                                    status_html = f"""
+                                    <div class="status-box">
+                                        Încercări: {attempts:,} | Cel Mai Bun WIN: {best_score}
+                                    </div>
+                                    """
+                                    status_placeholder.markdown(status_html, unsafe_allow_html=True)
+                                    time.sleep(0.01) # Pauză scurtă pentru a permite interfeței să se actualizeze
+                        
+                        st.session_state.optimization_attempts = attempts
+                        generated_variants = best_variants
+                        win_score = best_score
+                        
+                        # Curățăm placeholder-ul și afișăm mesajul final
+                        status_placeholder.empty()
+                        
+                        win_message = f"🏆 Optimizare reușită după **{attempts:,}** încercări! S-au obținut **{win_score} WINs** (Ținta: {target_win_score})."
+                        
+                    else:
+                        # Generare Simplă (O singură rulare)
+                        with st.spinner(f"Se generează {count} variante random și se calculează scorul..."):
+                            
+                            indices = list(range(len(st.session_state.variants)))
+                            random.shuffle(indices)
+                            generated_variants = [st.session_state.variants[i] for i in indices[:count]]
+                            
+                            win_score = calculate_wins(generated_variants, st.session_state.rounds)
+                            st.session_state.optimization_attempts = 0 
+                            win_message = f"✅ S-au generat {len(generated_variants)} variante și s-au obținut **{win_score} WINs**!"
+
+
+                    # Actualizarea Session State
+                    st.session_state.generated_variants = generated_variants
+                    st.session_state.win_score = win_score
+                    
+                    performance_text = analyze_round_performance(generated_variants, st.session_state.rounds)
+                    st.session_state.round_performance_text = performance_text
+                        
+                    st.success(win_message)
+                    st.balloons()
+                    
+                    # Forțează o re-rulare completă a paginii doar la final, pentru a actualiza tab-urile
+                    st.rerun() 
+        
+        # -------------------------------------------------------------------------
+        # Secțiunea 4: Afișare Contor Încercări (dacă a rulat optimizarea)
+        # -------------------------------------------------------------------------
+        if st.session_state.optimization_attempts > 0:
+             st.info(f"Ultima rulare în Mod Optimă a necesitat **{st.session_state.optimization_attempts:,}** încercări.")
+
+
+# TAB 3: Rezultate
+with tab3:
+    st.markdown("## 📊 Rezultate Generate")
+    
+    if not st.session_state.generated_variants:
+        st.info("ℹ️ Nu există rezultate generate încă. Mergi la tab-ul 'Generează Random & Calculează Win' pentru a genera variante.")
+    else:
+        # Statistici
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Variante Generate", len(st.session_state.generated_variants))
+        
+        with col2:
+            st.metric("Din Total", len(st.session_state.variants))
+        
+        with col3:
+            st.metric("Runde Folosite", len(st.session_state.rounds_raw))
+
+        with col4:
+            st.metric("Scor WIN Obținut", st.session_state.win_score)
+        
+        st.markdown("---")
+        
+        # Butoane de export
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.download_button(
+                "💾 Descarcă TXT",
+                data=variants_to_text(st.session_state.generated_variants),
+                file_name=f"variante_random_{len(st.session_state.generated_variants)}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        
+        with col2:
+            st.download_button(
+                "📊 Descarcă CSV",
+                data=variants_to_csv(st.session_state.generated_variants),
+                file_name=f"variante_random_{len(st.session_state.generated_variants)}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col3:
+            if st.button("🔄 Generează Din Nou (Revino la Tab 2)", use_container_width=True):
+                st.session_state.generated_variants = []
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Afișare rezultate
+        st.markdown("### 📋 Lista Completă de Variante Generate")
+        
+        df_results = pd.DataFrame(st.session_state.generated_variants)
+        
+        st.dataframe(
+            df_results,
+            use_container_width=True,
+            hide_index=True,
+            height=400
+        )
+        
+        with st.expander("🔍 Caută în rezultate"):
+            search_term = st.text_input("Caută după ID sau combinație în rezultate")
+            
+            if search_term:
+                filtered = [
+                    v for v in st.session_state.generated_variants
+                    if search_term.lower() in v['id'].lower() or 
+                       search_term.lower() in v['combination'].lower()
+                ]
+                
+                if filtered:
+                    st.success(f"✅ S-au găsit {len(filtered)} rezultate")
+                    st.dataframe(
+                        pd.DataFrame(filtered),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.warning("❌ Nu s-au găsit rezultate")
+
+# Footer
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; color: white; padding: 1rem;'>
+        <p>🎲 Generator Variante Loterie | Creat cu ❤️ folosind Streamlit</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
