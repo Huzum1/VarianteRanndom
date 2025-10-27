@@ -10,6 +10,7 @@ from io import BytesIO
 from multiprocessing import Pool, cpu_count
 from functools import partial
 import sys
+import math
 
 # =========================================================================
 # CONSTANTE ȘI CONFIGURARE PAGINĂ
@@ -20,16 +21,16 @@ MAX_RANDOM_ATTEMPTS = 50000
 INTERMEDIATE_SAVE_INTERVAL = 10000
 NUM_PROCESSES = max(1, cpu_count() - 1)
 CHART_UPDATE_INTERVAL = 1000
-LOCAL_SEARCH_DEFAULT_ITERATIONS = 5000 # Rămâne ca referință inițială/vizuală
+LOCAL_SEARCH_DEFAULT_ITERATIONS = 5000 
 BATCH_SIZE = 200 
 EARLY_STOP_NO_IMPROVEMENT = 5000 
-MAX_PERTURB_ITERATIONS = 5000 # Limita de siguranță Faza 3
+MAX_PERTURB_ITERATIONS = 5000 
 
 # CONSTANTE DE SCOR ȘI OPTIMIZARE (Ajustat pentru Robustness)
-PENALTY_FACTOR_K = 0.5  # Mărit de la 0.3 la 0.5 pentru a forța uniformitatea (robustness)
+PENALTY_FACTOR_K = 0.5  # Mărit pentru a forța uniformitatea (robustness)
 NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
 LOTTERY_MAX_NUMBER = 66
-LOTTERY_MIN_NUMBERS = 4 # Număr minim de numere per variantă
+LOTTERY_MIN_NUMBERS = 4 
 
 st.set_page_config(
     page_title="Generator Variante Loterie (Premium)",
@@ -38,7 +39,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS PERSONALIZAT ---
+# --- CSS PERSONALIZAT (Neschimbat) ---
 st.markdown("""
     <style>
     .main { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
@@ -56,12 +57,12 @@ st.markdown("""
     .score-detail { font-size: 0.9rem; font-weight: normal; margin-top: 5px; }
     .intermediate-save { color: #27ae60; font-size: 0.8rem; margin-top: 5px; }
     .target-met { background-color: #27ae60; color: white; }
-    .perturbation-status { background-color: #9b59b6; color: white; } /* Nou pentru Faza 3 */
+    .perturbation-status { background-color: #9b59b6; color: white; }
     </style>
 """, unsafe_allow_html=True)
 
 # =========================================================================
-# INITIALIZARE SESIUNE (fără modificări)
+# INITIALIZARE SESIUNE (Neschimbat)
 # =========================================================================
 
 if 'variants' not in st.session_state: st.session_state.variants = []
@@ -91,20 +92,220 @@ if 'params' not in st.session_state:
     }
 if 'score_evolution_data' not in st.session_state:
     st.session_state.score_evolution_data = []
+if 'round_performance_text' not in st.session_state:
+    st.session_state.round_performance_text = ""
 
 # =========================================================================
-# FUNCȚII UTILITY ȘI SCOR (Modificat pentru Validare Robustă)
+# FUNCȚII UTILITY ȘI SCOR (Adăugate pentru funcționalitate)
 # =========================================================================
 
+def precompute_variant_sets(variants):
+    """Calculează seturile de numere o singură dată."""
+    sets = []
+    for v in variants:
+        try:
+            numbers = [int(n) for n in v['combination'].split()]
+            sets.append(frozenset(numbers))
+        except:
+            sets.append(frozenset()) # Set gol in caz de eroare
+    return sets
+
+def calculate_match_score(variant_set, round_set):
+    """Calculează scorul de potrivire (WIN/3/2)"""
+    matches = len(variant_set.intersection(round_set))
+    return matches
+
+def get_round_weights(rounds):
+    """Calculează o pondere inversă bazată pe recența rundelor."""
+    weights = {}
+    
+    # Asumăm că rundele sunt ordonate cronologic (cea mai veche prima)
+    # Dacă nu sunt, această logică va pondera incorect. 
+    # Totuși, urmăm logica de recență: rundele mai recente au pondere mai mare.
+    
+    num_rounds = len(rounds)
+    if num_rounds == 0:
+        return {r: 1 for r in rounds}
+
+    for i, r in enumerate(rounds):
+        # Pondere: [0.1, 0.2, 0.3, ..., 1.0] pentru ultimele 10 runde, sau 1 pentru restul
+        weight = 1.0 
+        if num_rounds > 10:
+             if i >= num_rounds - 10:
+                 weight = 0.1 + 0.9 * (i - (num_rounds - 10)) / 9 
+        else:
+             weight = 0.1 + 0.9 * i / (num_rounds - 1) if num_rounds > 1 else 1.0
+             
+        weights[r] = weight
+        
+    return weights
+
+def calculate_wins_optimized(indices, all_variant_sets, rounds_data_list, round_weights_data=None, 
+                             use_deviation_penalty=True, penalty_factor_k=PENALTY_FACTOR_K):
+    """Calculează scorul de Fitness complet pentru un set de indici."""
+    
+    current_variant_sets = [all_variant_sets[i] for i in indices]
+    
+    total_win_score = 0
+    total_score_3_3 = 0
+    total_score_2_2 = 0
+    weighted_score_sum = 0
+    
+    score_per_round = {}
+    wins_per_round = []
+    
+    # Convert round_weights_data back to a dictionary if provided
+    round_weights = {frozenset(r): w for r, w in round_weights_data} if round_weights_data else None
+
+    # Calculate wins per round
+    for r_data in rounds_data_list:
+        runda_set = frozenset(r_data)
+        round_wins = 0
+        round_3_3 = 0
+        round_2_2 = 0
+        
+        weight = round_weights.get(runda_set, 1.0) if round_weights else 1.0
+        
+        for v_set in current_variant_sets:
+            matches = calculate_match_score(v_set, runda_set)
+            if matches >= 4: round_wins += 1
+            elif matches == 3: round_3_3 += 1
+            elif matches == 2: round_2_2 += 1
+        
+        total_win_score += round_wins
+        total_score_3_3 += round_3_3
+        total_score_2_2 += round_2_2
+        
+        # Ponderare: Ponderăm scorul doar pe WINs
+        weighted_score_sum += round_wins * weight
+        
+        wins_per_round.append(round_wins)
+        
+        score_per_round[str(r_data)] = {
+            'wins': round_wins,
+            '3_3': round_3_3,
+            '2_2': round_2_2
+        }
+        
+    # Calcularea Deviației Standard (Uniformitate)
+    std_dev_wins = statistics.stdev(wins_per_round) if len(wins_per_round) >= 2 else 0
+    
+    # Calculul Fitness-ului
+    
+    # Baza Fitness: Scorul ponderat
+    fitness_score = weighted_score_sum
+    
+    # Adaugă bonus pentru 3/3 și 2/2 (mai puțin importante ca WINs)
+    fitness_score += total_score_3_3 * 0.01  
+    fitness_score += total_score_2_2 * 0.001 
+    
+    # Penalizare de Uniformitate (Robustness)
+    if use_deviation_penalty:
+        # Penalizarea mare pentru deviație mare
+        penalty = penalty_factor_k * std_dev_wins 
+        fitness_score -= penalty
+
+    return {
+        'win_score': total_win_score,
+        'score_3_3': total_score_3_3,
+        'score_2_2': total_score_2_2,
+        'weighted_score_sum': weighted_score_sum,
+        'std_dev_wins': std_dev_wins,
+        'fitness_score': fitness_score,
+        'score_per_round': score_per_round
+    }
+
+def compare_scores(score1, score2):
+    """Compară două scoruri bazate pe Fitness-ul Ponderat."""
+    if score1['fitness_score'] > score2['fitness_score']:
+        return True
+    return False
+
+def plot_score_evolution(data):
+    """Generează graficul de evoluție a scorului de Fitness."""
+    if not data:
+        return None
+    df = pd.DataFrame(data)
+    fig = px.line(df, x='Încercare', y='Fitness', title='Evoluția Scorului de Fitness')
+    fig.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font_color='white',
+        xaxis=dict(gridcolor='rgba(255,255,255,0.2)'),
+        yaxis=dict(gridcolor='rgba(255,255,255,0.2)')
+    )
+    return fig
+
+def parse_rounds_file(file):
+    if file is None: return [], []
+    try:
+        content = file.getvalue().decode("utf-8")
+        return process_round_text(content)
+    except Exception as e:
+        return [], []
+
+def process_round_text(text):
+    """Procesează textul rundelor (ex: 1 2 3 4)."""
+    rounds_set = []
+    rounds_raw = []
+    lines = text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        try:
+            numbers = [int(n.strip()) for n in line.split() if n.strip().isdigit()]
+            if len(numbers) >= 4:
+                rounds_set.append(frozenset(numbers))
+                rounds_raw.append(sorted(numbers))
+        except:
+            continue
+            
+    return rounds_set, rounds_raw
+
+def analyze_round_performance(generated_variants, rounds, generated_sets):
+    """Analizează și formatează performanța finală pe rundă."""
+    
+    rounds_data_list = [sorted(list(r)) for r in rounds]
+    performance_list = []
+
+    for r_data in rounds_data_list:
+        runda_set = frozenset(r_data)
+        round_wins = 0
+        round_3_3 = 0
+        round_2_2 = 0
+        
+        for v_set in generated_sets:
+            matches = calculate_match_score(v_set, runda_set)
+            if matches >= 4: round_wins += 1
+            elif matches == 3: round_3_3 += 1
+            elif matches == 2: round_2_2 += 1
+        
+        performance_list.append({
+            'Runda': ' '.join(map(str, r_data)),
+            'WINs': round_wins,
+            '3/3': round_3_3,
+            '2/2': round_2_2
+        })
+
+    df = pd.DataFrame(performance_list)
+    
+    # Sortare pe WINs și 3/3 (cele mai slabe la început)
+    df_sorted = df.sort_values(by=['WINs', '3/3', '2/2'], ascending=[True, True, True])
+    
+    output = "Performanță Detaliată pe Rundă (Sortat de la cele mai slabe):\n\n"
+    output += df_sorted.to_string(index=False)
+    
+    return output
+
+# ... (Funcțiile de validare rămân neschimbate) ...
 def validate_variant_set(numbers, variant_id, min_numbers=LOTTERY_MIN_NUMBERS, max_value=LOTTERY_MAX_NUMBER):
     """Verifică dacă un set de numere este valid."""
     unique_numbers = sorted(list(set(numbers)))
     
-    # 1. Verifică numărul minim de numere
     if len(unique_numbers) < min_numbers:
         return False, f"Varianta {variant_id} are sub {min_numbers} numere unice ({len(unique_numbers)})."
         
-    # 2. Verifică intervalul de numere
     for n in unique_numbers:
         if not (1 <= n <= max_value):
             return False, f"Varianta {variant_id} conține numărul {n} care nu este în intervalul 1-{max_value}."
@@ -181,11 +382,9 @@ def parse_variants_file(file):
         return parse_variants(content)
     except Exception as e:
         return [], [f"Eroare citire fișier: {str(e)}"], 0, 0
-
-# ... (Restul funcțiilor de utilitate și scor rămân neschimbate) ...
-
+        
 # =========================================================================
-# FUNCȚII MULTIPROCESSING (fără modificări structurale)
+# FUNCȚII MULTIPROCESSING (Adăugate)
 # =========================================================================
 
 def evaluate_random_sample_worker(args):
@@ -222,15 +421,12 @@ def evaluate_candidate_hole_worker(args):
         elif matches == 2: hole_score += 10
     
     return candidate_idx, hole_score
-
+    
 # =========================================================================
-# STREAMLIT UI & LOGIC FLOW
+# STREAMLIT UI & LOGIC FLOW (Integrate)
 # =========================================================================
 
-st.markdown("# 👑 Generator Variante Loterie (Premium Optimizat)")
-st.markdown("### Optimizare Multi-CPU Fără Blocaje - Performanță Maximă")
-
-# Sidebar
+# ... (Sidebar - Neschimbat) ...
 with st.sidebar:
     st.markdown("## 📊 Statistici Curente")
     st.metric("Variante Curățate", len(st.session_state.variants))
@@ -274,12 +470,12 @@ with st.sidebar:
 tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante", "🎲 Generează", "📊 Rezultate"])
 
 # =========================================================================
-# TAB 1: ÎNCARCĂ VARIANTE (Modificat pentru Validare)
+# TAB 1: ÎNCARCĂ VARIANTE (Implementat)
 # =========================================================================
 with tab1:
     st.markdown("## 📝 Pas 1: Încarcă Variantele Tale")
     
-    upload_method = st.radio("Metodă:", ["📄 Fișier", "⌨️ Text"], horizontal=True)
+    upload_method = st.radio("Metodă:", ["📄 Fișier", "⌨️ Text"], horizontal=True, key="upload_method_tab1")
     
     if upload_method == "📄 Fișier":
         variants_file = st.file_uploader(
@@ -296,22 +492,20 @@ with tab1:
                 
                 if errors:
                     st.error(f"Erori de validare găsite: {len(errors)} variante invalide/duplicate.")
-                    for err in errors[:10]:
-                        st.write(f"- {err}")
-                    if len(errors) > 10:
-                        st.write(f"... și alte {len(errors) - 10} erori.")
+                    for err in errors[:10]: st.write(f"- {err}")
+                    if len(errors) > 10: st.write(f"... și alte {len(errors) - 10} erori.")
                 
                 if st.session_state.variants:
                     st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
                     st.success(f"🎉 {len(st.session_state.variants)} variante **valide** încărcate!")
                     st.rerun()
-                elif not errors:
-                     st.warning("Fișierul a fost citit, dar nu s-au găsit variante valide.")
+                elif not errors: st.warning("Fișierul a fost citit, dar nu s-au găsit variante valide.")
     else:
         st.session_state.variants_input_text = st.text_area(
             "Variante (ID, numere)", 
             value=st.session_state.variants_input_text, 
-            height=300
+            height=300,
+            key="variants_input_text_area"
         )
 
         if st.button("📥 Încarcă din Text", use_container_width=True, type="primary"):
@@ -321,22 +515,22 @@ with tab1:
                 
                 if errors:
                     st.error(f"Erori de validare găsite: {len(errors)} variante invalide/duplicate.")
-                    for err in errors[:10]:
-                        st.write(f"- {err}")
-                    if len(errors) > 10:
-                        st.write(f"... și alte {len(errors) - 10} erori.")
+                    for err in errors[:10]: st.write(f"- {err}")
+                    if len(errors) > 10: st.write(f"... și alte {len(errors) - 10} erori.")
                 
                 if st.session_state.variants:
                     st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
                     st.success(f"🎉 {len(st.session_state.variants)} variante **valide** încărcate!")
                     st.rerun()
-                elif not errors:
-                     st.warning("Textul a fost procesat, dar nu s-a găsit nicio variantă validă.")
+                elif not errors: st.warning("Textul a fost procesat, dar nu s-a găsit nicio variantă validă.")
 
-    # ... (Restul Tab 1 - Download) ...
+    if st.session_state.variants:
+        df_variants = pd.DataFrame(st.session_state.variants)
+        st.markdown("### Previzualizare Variante Încărcate")
+        st.dataframe(df_variants.head(10))
 
 # =========================================================================
-# TAB 2: Generare & Optimizare (Modificări pentru Faza 2 și Faza 3)
+# TAB 2: Generare & Optimizare (Implementat)
 # =========================================================================
 with tab2:
     st.markdown("## 🎲 Pas 2: Configurare și Generare")
@@ -346,10 +540,9 @@ with tab2:
     else:
         st.markdown("### 1. Încarcă Rundele")
         
-        # ... (Logica de încărcare a rundelor - neschimbată) ...
         col_file, col_manual = st.columns(2)
-        rounds_file = col_file.file_uploader("Fișier Runde", type=['txt', 'csv'], key="rounds_uploader")
-        manual_rounds_input = col_manual.text_area("Sau manual", value=st.session_state.manual_rounds_input, height=100)
+        rounds_file = col_file.file_uploader("Fișier Runde (Numere spațiate)", type=['txt', 'csv'], key="rounds_uploader")
+        manual_rounds_input = col_manual.text_area("Sau adaugă manual (o rundă pe linie)", value=st.session_state.manual_rounds_input, height=100, key="manual_rounds_input_area")
         st.session_state.manual_rounds_input = manual_rounds_input
         
         rounds_from_file_set, rounds_from_file_raw = parse_rounds_file(rounds_file)
@@ -366,7 +559,7 @@ with tab2:
         
         st.metric("Total Runde", len(st.session_state.rounds))
 
-        st.markdown("### 2. Configurare")
+        st.markdown("### 2. Configurare Algoritm")
 
         col1, col2, col3 = st.columns(3)
         
@@ -375,7 +568,8 @@ with tab2:
                 "Variante de generat", 
                 min_value=1, 
                 max_value=len(st.session_state.variants), 
-                value=min(st.session_state.params['count'], len(st.session_state.variants))
+                value=min(st.session_state.params['count'], len(st.session_state.variants)),
+                key="variant_count_input"
             )
         
         with col2:
@@ -383,7 +577,7 @@ with tab2:
                 "WINs Țintă +", 
                 min_value=0, 
                 value=st.session_state.params['target_wins_plus'],
-                help="Numărul total de WINs țintă va fi: Total Runde + această valoare."
+                key="target_wins_input"
             )
             
         with col3:
@@ -391,26 +585,27 @@ with tab2:
                 "Iterații Faza 2 (Vizual/Stop)", 
                 min_value=0, 
                 value=LOCAL_SEARCH_DEFAULT_ITERATIONS,
-                help="Această limită este doar vizuală și pentru progres. Căutarea continuă până la scorul țintă sau blocaj de Fitness."
+                key="local_iterations_input"
             )
             
         col4, col5 = st.columns(2)
         with col4:
             st.session_state.params['use_recency_weighting'] = st.checkbox(
                 "Ponderare Recență", 
-                value=True
+                value=True,
+                key="recency_weighting_checkbox"
             )
         with col5:
             st.session_state.params['use_deviation_penalty'] = st.checkbox(
-                "Penalizare Uniformitate", 
-                value=True
+                f"Penalizare Uniformitate (K={PENALTY_FACTOR_K})", 
+                value=True,
+                key="deviation_penalty_checkbox"
             )
         
-        # Setează K-factorul final
-        st.session_state.params['penalty_factor_k'] = PENALTY_FACTOR_K 
+        st.session_state.params['penalty_factor_k'] = PENALTY_FACTOR_K # Setează K-factorul final
 
 
-        if st.button("🚀 GENEREAZĂ OPTIMIZAT", use_container_width=True, type="primary"):
+        if st.button("🚀 GENEREAZĂ OPTIMIZAT", use_container_width=True, type="primary", key="generate_button"):
             
             if not st.session_state.rounds:
                 st.error("Încarcă runde mai întâi!")
@@ -441,13 +636,15 @@ with tab2:
                 st.session_state.score_evolution_data = []
                 
                 if not st.session_state.variants_sets_precomputed:
-                    with st.spinner("Precomputare..."):
+                    with st.spinner("Precomputare seturi de variante..."):
                         st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
                 
                 all_variant_sets = st.session_state.variants_sets_precomputed
                 num_variants = len(st.session_state.variants)
                 
+                # =========================================================================
                 # FAZA 1: Căutare Aleatorie Multi-CPU
+                # =========================================================================
                 st.info(f"🚀 FAZA 1: {MAX_RANDOM_ATTEMPTS:,} încercări (Țintă WIN: {target_win_score})")
 
                 status_placeholder = st.empty()
@@ -460,7 +657,7 @@ with tab2:
                 pool_faza1 = None
                 try:
                     pool_faza1 = Pool(processes=NUM_PROCESSES)
-                    # ... (Logica Fazei 1 - Neschimbată) ...
+                    
                     seeds = [random.randint(0, 999999) + i for i in range(MAX_RANDOM_ATTEMPTS)]
                     args_list = [
                         (seed, count, num_variants, rounds_data_list, round_weights_data,
@@ -468,12 +665,12 @@ with tab2:
                         for seed in seeds
                     ]
                     
-                    batch_size = NUM_PROCESSES * 10
-                    total_batches = (MAX_RANDOM_ATTEMPTS + batch_size - 1) // batch_size
+                    batch_size_faza1 = NUM_PROCESSES * 10
+                    total_batches = (MAX_RANDOM_ATTEMPTS + batch_size_faza1 - 1) // batch_size_faza1
                     
                     for batch_idx in range(total_batches):
-                        start_idx = batch_idx * batch_size
-                        end_idx = min(start_idx + batch_size, MAX_RANDOM_ATTEMPTS)
+                        start_idx = batch_idx * batch_size_faza1
+                        end_idx = min(start_idx + batch_size_faza1, MAX_RANDOM_ATTEMPTS)
                         batch_args = args_list[start_idx:end_idx]
                         
                         batch_results = pool_faza1.map(evaluate_random_sample_worker, batch_args)
@@ -510,27 +707,16 @@ with tab2:
                         
                         if attempts % CHART_UPDATE_INTERVAL == 0:
                             fig = plot_score_evolution(score_evolution_data)
-                            if fig:
-                                chart_placeholder.plotly_chart(fig, use_container_width=True)
-                        
-                        if attempts % INTERMEDIATE_SAVE_INTERVAL == 0 and best_variant_indices:
-                             # ... (Logica de salvare intermediară) ...
-                             save_variants = [st.session_state.variants[i] for i in best_variant_indices]
-                             st.session_state.intermediate_saves.append({
-                                 'attempt': attempts,
-                                 'score': best_score.copy(),
-                                 'variants': deepcopy(save_variants)
-                             })
+                            if fig: chart_placeholder.plotly_chart(fig, use_container_width=True)
                         
                         if no_improvement_counter >= EARLY_STOP_NO_IMPROVEMENT:
                             st.info(f"⏹️ Early stop Faza 1 la {attempts:,} (no improvement: {no_improvement_counter})")
                             break
                         
-                        if attempts >= MAX_RANDOM_ATTEMPTS:
-                             break
+                        if attempts >= MAX_RANDOM_ATTEMPTS: break
                 
                 except Exception as e:
-                    st.error(f"Eroare Faza 1: {str(e)}")
+                    st.error(f"🔴 EROARE CRITICĂ ÎN FAZA 1: {str(e)}")
                 finally:
                     if pool_faza1:
                         pool_faza1.close()
@@ -562,11 +748,11 @@ with tab2:
                     pool_faza2 = None
                     try:
                         
-                        # BUCĂ ÎNIFINITĂ: Se oprește la scorul țintă sau la Limita de Siguranță sau la Blocaj
+                        # BUCĂ ÎNIFINITĂ
                         while True:
                             local_attempts += 1
                             
-                            # 1. Găsește varianta cea mai slabă (pe baza scorului de Fitness)
+                            # 1. Găsește varianta cea mai slabă (pe baza scorului de baza)
                             variant_scores = {}
                             for idx in current_best_indices:
                                 score_single = calculate_wins_optimized(
@@ -589,20 +775,16 @@ with tab2:
                                 try:
                                     k_list = eval(k_str)
                                     score_per_round_dict[frozenset(k_list)] = v
-                                except:
-                                    continue
+                                except: continue
                             
                             weakest_rounds = sorted(
                                 score_per_round_dict.items(),
-                                key=lambda item: (item[1]['wins'] * 1000 + 
-                                                item[1]['3_3'] * 10 + 
-                                                item[1]['2_2'])
+                                key=lambda item: (item[1]['wins'] * 1000 + item[1]['3_3'] * 10 + item[1]['2_2'])
                             )[:NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS]
                             
                             weak_round_sets = [item[0] for item in weakest_rounds]
                             weak_round_sets_data = [sorted(list(r)) for r in weak_round_sets]
                             
-                            # Găsește candidați (Sample)
                             available_indices = [i for i in range(num_variants) 
                                                if i not in current_best_indices]
                             if not available_indices: break
@@ -610,17 +792,16 @@ with tab2:
                             sample_size = min(BATCH_SIZE, len(available_indices))
                             sampled_indices = random.sample(available_indices, sample_size)
                             
-                            # EVALUARE PARALELĂ (Hole Coverage)
-                            args_list_faza2 = [
-                                (idx, all_variant_sets, weak_round_sets_data)
-                                for idx in sampled_indices
-                            ]
-                            
                             # Reinițializarea Pool-ului pentru stabilitate
                             if pool_faza2:
                                 pool_faza2.close()
                                 pool_faza2.join()
                             pool_faza2 = Pool(processes=NUM_PROCESSES)
+                            
+                            args_list_faza2 = [
+                                (idx, all_variant_sets, weak_round_sets_data)
+                                for idx in sampled_indices
+                            ]
                             
                             hole_scores = pool_faza2.map(evaluate_candidate_hole_worker, args_list_faza2)
                             
@@ -697,19 +878,17 @@ with tab2:
                     st.info(f"🌪️ FAZA 3: Perturbare Globală. **Obiectiv: Maximizare Fitness & Robustness**. Ieșirea din optimul local.")
                     
                     force_status_placeholder = st.empty()
-                    perturb_attempts = 0
                     current_best_indices = best_variant_indices.copy()
                     current_best_score = best_score.copy()
                     
                     for perturb_attempts in range(1, MAX_PERTURB_ITERATIONS + 1):
                         
-                        # 1. Găsește o pereche de indici de schimb
                         available_indices_force = [i for i in range(num_variants) 
                                                    if i not in current_best_indices]
                         
                         if not available_indices_force: break
                         
-                        # Alege o varianta slabă de scos (cea mai slabă)
+                        # 1. Găsește varianta cea mai slabă (pe scorul de baza)
                         variant_scores = {}
                         for idx in current_best_indices:
                             score_single = calculate_wins_optimized(
@@ -724,10 +903,10 @@ with tab2:
                         weakest_idx = min(variant_scores, key=variant_scores.get)
                         weakest_position = current_best_indices.index(weakest_idx)
                         
-                        # Alege o varianta de introdus (aleatoriu, pentru perturbare)
+                        # 2. Alege o varianta de introdus (aleatoriu, pentru perturbare)
                         candidate_idx = random.choice(available_indices_force)
                         
-                        # 2. Testare Perturbare
+                        # 3. Testare Perturbare
                         test_indices = current_best_indices.copy()
                         test_indices[weakest_position] = candidate_idx
                         
@@ -736,19 +915,15 @@ with tab2:
                             round_weights_data, use_deviation_penalty, penalty_factor_k
                         )
                         
-                        # 3. Acceptare Schimbare (Simulated Annealing Simplificat)
+                        # 4. Acceptare Schimbare (Simulated Annealing Simplificat)
                         is_better = compare_scores(test_score, current_best_score)
                         
                         accept_worse = False
                         if not is_better and current_best_score['fitness_score'] != -float('inf'):
-                            # Temperatura scade de la 10% la 1%
                             current_temperature = 0.01 + 0.09 * (1 - perturb_attempts / MAX_PERTURB_ITERATIONS)
                             score_diff = current_best_score['fitness_score'] - test_score['fitness_score']
                             
-                            # Probabilitate invers proportionala cu diferenta negativa
                             if score_diff > 0:
-                                # Acceptă o soluție mai slabă dacă e mică și probabilitatea e mare
-                                # Folosim o probabilitate simplificată bazată pe temperatură.
                                 if (random.random() < current_temperature):
                                     accept_worse = True
                                 
@@ -760,11 +935,10 @@ with tab2:
                                 perturb_type = "Îmbunătățire"
                             elif accept_worse:
                                 perturb_type = f"Acceptare Inferioară (Temp: {current_temperature:.2f})"
-                            
                         else:
                             perturb_type = "Respinsă"
                             
-                        # 4. UI Update
+                        # 5. UI Update
                         score_detail = f"FIT: **{current_best_score['fitness_score']:.0f}** | WIN: {current_best_score['win_score']:,} / {target_win_score}"
                         status_html = f"""
                         <div class="status-box perturbation-status">
@@ -785,7 +959,6 @@ with tab2:
                     best_variant_indices = current_best_indices.copy()
                     force_status_placeholder.empty()
                     
-                    # Re-evaluarea finală
                     best_score = current_best_score
                     st.success(f"✅ FAZA 3 Finalizată. Fitness final: {best_score['fitness_score']:.0f}")
                     
@@ -793,7 +966,6 @@ with tab2:
                 st.session_state.generated_variants = [st.session_state.variants[i] for i in best_variant_indices]
                 st.session_state.best_score_full = best_score
                 
-                # Analiză performanță
                 generated_sets = [all_variant_sets[i] for i in best_variant_indices]
                 performance_text = analyze_round_performance(
                     st.session_state.generated_variants, 
@@ -806,4 +978,57 @@ with tab2:
                 st.balloons()
                 st.rerun()
 
-# ... (Restul Tab 3: Rezultate - Neschimbat) ...
+# =========================================================================
+# TAB 3: Rezultate (Implementat)
+# =========================================================================
+
+with tab3:
+    st.markdown("## 📊 Rezultate & Analiză Finală")
+
+    if not st.session_state.generated_variants:
+        st.info("Rulați optimizarea mai întâi în Tab-ul 2.")
+    else:
+        st.markdown("### 1. Setul de Variante Optimizat")
+        
+        df_results = pd.DataFrame(st.session_state.generated_variants)
+        st.dataframe(df_results)
+
+        csv_export = df_results.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Descărcă Variantele (CSV)",
+            csv_export,
+            "variante_optimizate.csv",
+            "text/csv",
+            key='download-csv'
+        )
+        
+        st.markdown("---")
+        st.markdown("### 2. Performanța Finală")
+        
+        col_res1, col_res2, col_res3, col_res4 = st.columns(4)
+        score = st.session_state.best_score_full
+        
+        with col_res1: st.metric("Fitness Final", f"{score['fitness_score']:.0f}")
+        with col_res2: st.metric("Total WINs", f"{score['win_score']:,}")
+        with col_res3: st.metric("Total 3/3", f"{score['score_3_3']:,}")
+        with col_res4: st.metric("Deviație Std", f"{score['std_dev_wins']:.2f}")
+
+        st.markdown("---")
+        st.markdown("### 3. Detaliu Performanță pe Rundă (Robustness)")
+
+        st.text_area(
+            "Analiză Detaliată a Performanței",
+            st.session_state.round_performance_text,
+            height=400,
+            key="performance_text_area"
+        )
+        
+        st.markdown("---")
+        st.markdown("### 4. Evoluția Scorului")
+        
+        if st.session_state.score_evolution_data:
+            fig = plot_score_evolution(st.session_state.score_evolution_data)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Nicio evoluție disponibilă.")
