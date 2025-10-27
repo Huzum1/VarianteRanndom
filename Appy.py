@@ -1,4 +1,4 @@
-import streamlit as st
+1import streamlit as st
 import pandas as pd
 import random
 import time
@@ -8,7 +8,7 @@ import statistics
 import numpy as np
 from io import BytesIO
 from multiprocessing import Pool, cpu_count
-from functools import partial
+from functools import partial # CRITIC: Adăugat pentru a rezolva PicklingError în Faza 2
 import sys 
 
 # =========================================================================
@@ -53,7 +53,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================================================================
-# INITIALIZARE SESIUNE (fără schimbări)
+# INITIALIZARE SESIUNE
 # =========================================================================
 
 if 'variants' not in st.session_state: st.session_state.variants = []
@@ -85,7 +85,7 @@ if 'score_evolution_data' not in st.session_state:
     st.session_state.score_evolution_data = []
 
 # =========================================================================
-# FUNCȚII UTILITY (fără schimbări, dar necesare)
+# FUNCȚII UTILITY
 # =========================================================================
 
 def clean_variant_combination(numbers_str):
@@ -261,8 +261,6 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds, round_we
 
 def compare_scores(current_score, best_score, target_win_score):
     """Compară două scoruri folosind Fitness Score ca prioritate principală."""
-    # În Faza 1, oprirea pe target_win_score este ignorată conform cerințelor.
-    # În Faza 2, trebuie să îmbunătățim scorul.
     
     if current_score['fitness_score'] > best_score['fitness_score']: return True
     if current_score['fitness_score'] < best_score['fitness_score']: return False
@@ -372,7 +370,7 @@ def analyze_variant_strength(variants, rounds):
     return df_strength
 
 # =========================================================================
-# FUNCȚII PLOTLY (fără schimbări)
+# FUNCȚII PLOTLY
 # =========================================================================
 
 def plot_score_evolution(scores_data):
@@ -403,7 +401,7 @@ def plot_score_evolution(scores_data):
     return fig
 
 # =========================================================================
-# FUNCȚII MULTIPROCESSING (Adăugat worker pentru Faza 2)
+# FUNCȚII MULTIPROCESSING (Cu Corecție PicklingError pentru Faza 2)
 # =========================================================================
 
 def evaluate_random_sample_worker(args):
@@ -414,6 +412,7 @@ def evaluate_random_sample_worker(args):
     rounds = [frozenset(r) for r in rounds_data] 
     
     if round_weights_data:
+        # Folosește eval pentru a re-crea frozenset-ul din cheia string (mai sigur pentru pickle)
         round_weights = {frozenset(eval(k)): v for k, v in round_weights_data.items()}
     else:
         round_weights = None
@@ -430,17 +429,20 @@ def evaluate_random_sample_worker(args):
     
     return sample_indices, score
 
-def evaluate_candidate_hole_worker(args):
+def evaluate_candidate_hole_worker(candidate_idx, all_variant_sets, weak_round_sets_data):
     """
     Worker pentru evaluarea candidaților pe rundele slabe (Faza 2).
     
+    NOTA: Functools.partial este folosit pentru a pre-încărca all_variant_sets și weak_round_sets_data 
+    pentru a evita eroarea Pickling.
+    
     Returnează: (indice_candidat, hole_score)
     """
-    candidate_idx, all_variant_sets, weak_round_sets_data = args
     
-    # Recreează frozenset-urile
+    # Recreează frozenset-urile (critice pentru siguranța Pickling)
     weak_round_sets = [frozenset(r) for r in weak_round_sets_data]
 
+    # Folosim direct set-ul variantei din argumentul
     variant_set = all_variant_sets[candidate_idx]
     hole_score = 0
     
@@ -513,7 +515,7 @@ with st.sidebar:
 tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante & Curăță", "🎲 Generează & Optimizează", "📊 Rezultate & Analiză"])
 
 # =========================================================================
-# TAB 1: ÎNCARCĂ VARIANTE (fără schimbări)
+# TAB 1: ÎNCARCĂ VARIANTE 
 # =========================================================================
 with tab1:
     st.markdown("## 📝 Pas 1: Încarcă Variantele Tale & Curăță Duplicatele")
@@ -709,6 +711,7 @@ with tab2:
                 
                 if use_recency_weighting:
                     round_weights = get_round_weights(st.session_state.rounds)
+                    # Convertim cheile (frozenset) la string pentru serializare sigură
                     round_weights_data = {str(list(k)): v for k, v in round_weights.items()}
                 else:
                     round_weights_data = None
@@ -739,6 +742,7 @@ with tab2:
                 
                 pool_faza1 = None
                 try:
+                    # Inizializăm Pool pentru Faza 1
                     pool_faza1 = Pool(processes=NUM_PROCESSES)
                     
                     worker_args = [
@@ -837,10 +841,9 @@ with tab2:
                         
                         for local_attempts in range(1, local_search_iterations + 1):
                             
-                            # 1. Identificare varianta cea mai slabă din eșantion (rămâne secvențial)
+                            # 1. Identificare varianta cea mai slabă din eșantion (secvențial)
                             variant_scores = {}
                             for idx in current_best_indices:
-                                # Notă: Evaluarea scorului variantei individuale (câte WIN-uri are) este foarte rapidă și nu merită paralelism
                                 score_single = calculate_wins_optimized(
                                     [idx], all_variant_sets, st.session_state.rounds, round_weights=round_weights_local
                                 )
@@ -856,6 +859,8 @@ with tab2:
                                 key=lambda item: item[1]['wins'] * 1000 + item[1]['3_3'] * 10 + item[1]['2_2']
                             )[:NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS]
                             weak_round_sets = [item[0] for item in weakest_rounds]
+                            
+                            # CRITIC: Asigurăm serializarea ca listă de liste simple de numere
                             weak_round_sets_data = [list(r) for r in weak_round_sets]
                             
                             # 3. Caută cel mai bun candidat din pool-ul mare (Eșantionare 1000)
@@ -864,14 +869,20 @@ with tab2:
                             sample_size = min(1000, len(available_indices))
                             sampled_indices = random.sample(available_indices, sample_size)
                             
-                            # CREARE ARGUMENTE PENTRU PARALELISM
-                            candidate_args = [
-                                (candidate_idx, all_variant_sets, weak_round_sets_data)
-                                for candidate_idx in sampled_indices
-                            ]
-                            
-                            # EVALUARE PARALELĂ
-                            hole_scores = pool_faza2.map(evaluate_candidate_hole_worker, candidate_args)
+                            if not sampled_indices:
+                                # Nu mai avem candidați, oprim optimizarea
+                                break
+                                
+                            # CREARE FUNCȚIE PARTIALĂ PENTRU PARALELISM (Soluție PICKLE)
+                            # Pre-încărcăm argumentele mari și neschimbate în funcția worker
+                            worker_func = partial(
+                                evaluate_candidate_hole_worker, 
+                                all_variant_sets=all_variant_sets, 
+                                weak_round_sets_data=weak_round_sets_data
+                            )
+
+                            # EVALUARE PARALELĂ: Trimiți doar lista de indici
+                            hole_scores = pool_faza2.map(worker_func, sampled_indices)
                             
                             best_hole_score = -1
                             best_candidate_idx = None
@@ -881,14 +892,10 @@ with tab2:
                                     best_hole_score = hole_score
                                     best_candidate_idx = candidate_idx
                             
-                            if best_candidate_idx is None and available_indices:
-                                # Fallback la alegere aleatorie dacă eșantionarea a eșuat (sau pool gol)
-                                best_candidate_idx = random.choice(available_indices)
-                            elif best_candidate_idx is None and not available_indices:
-                                # Nu mai avem candidați, oprim optimizarea
-                                break
+                            if best_candidate_idx is None:
+                                continue
                                 
-                            # 4. Testare și acceptare (rămâne secvențial, deoarece folosește starea curentă)
+                            # 4. Testare și acceptare (secvențial)
                             test_indices = current_best_indices.copy()
                             test_indices[weakest_position] = best_candidate_idx
                             
@@ -953,7 +960,7 @@ with tab2:
                 if fig:
                     st.plotly_chart(fig, use_container_width=True)
 
-# TAB 3: Rezultate & Analiză (fără schimbări)
+# TAB 3: Rezultate & Analiză
 with tab3:
     st.markdown("## 📊 Rezultate și Analiză Ultra Premium")
     
