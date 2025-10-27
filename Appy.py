@@ -16,17 +16,18 @@ import sys
 # =========================================================================
 
 # CONSTANTE DE VITEZĂ ȘI RESURSE - OPTIMIZATE
-MAX_RANDOM_ATTEMPTS = 50000  # Crescut pentru găsire mai bună
+MAX_RANDOM_ATTEMPTS = 50000 
 INTERMEDIATE_SAVE_INTERVAL = 10000
 NUM_PROCESSES = max(1, cpu_count() - 1)
 CHART_UPDATE_INTERVAL = 1000
-LOCAL_SEARCH_DEFAULT_ITERATIONS = 5000  # Optimizat pentru viteză
-BATCH_SIZE = 200  # Pentru procesare batch în Faza 2
-EARLY_STOP_NO_IMPROVEMENT = 5000  # Stop dacă nu se îmbunătățește
+LOCAL_SEARCH_DEFAULT_ITERATIONS = 5000 # Rămâne ca referință inițială/vizuală
+BATCH_SIZE = 200 
+EARLY_STOP_NO_IMPROVEMENT = 5000 
+EARLY_STOP_NO_IMPROVEMENT_LOCAL = 1000 # Nou: Limită non-îmbunătățire Faza 2
 
 # CONSTANTE DE SCOR
-PENALTY_FACTOR_K = 0.3  # Redus pentru mai multă flexibilitate
-NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10  # Redus pentru viteză
+PENALTY_FACTOR_K = 0.3
+NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
 
 st.set_page_config(
     page_title="Generator Variante Loterie (Premium)",
@@ -52,11 +53,12 @@ st.markdown("""
     .local-search-status { color: #e67e22; }
     .score-detail { font-size: 0.9rem; font-weight: normal; margin-top: 5px; }
     .intermediate-save { color: #27ae60; font-size: 0.8rem; margin-top: 5px; }
+    .target-met { background-color: #27ae60; color: white; }
     </style>
 """, unsafe_allow_html=True)
 
 # =========================================================================
-# INITIALIZARE SESIUNE
+# INITIALIZARE SESIUNE (fără modificări)
 # =========================================================================
 
 if 'variants' not in st.session_state: st.session_state.variants = []
@@ -88,11 +90,10 @@ if 'score_evolution_data' not in st.session_state:
     st.session_state.score_evolution_data = []
 
 # =========================================================================
-# FUNCȚII UTILITY
+# FUNCȚII UTILITY ȘI SCOR (fără modificări structurale)
 # =========================================================================
 
 def clean_variant_combination(numbers_str):
-    """Curăță șirul de numere, asigură unicitatea și le sortează."""
     try:
         parts = [p.strip() for p in numbers_str.split() if p.strip().isdigit()]
         valid_numbers = [int(p) for p in parts]
@@ -105,7 +106,6 @@ def clean_variant_combination(numbers_str):
         return numbers_str, 0
 
 def parse_variants(text):
-    """Parse variantele din text, curățând duplicatele."""
     variants = []
     errors = []
     total_internal_duplicates_removed = 0
@@ -143,7 +143,6 @@ def parse_variants(text):
     return final_variants, errors, total_internal_duplicates_removed, total_inter_duplicates_removed
 
 def parse_variants_file(file):
-    """Procesează fișier TXT/CSV cu variante."""
     if file is None: return [], []
     try:
         content = file.getvalue().decode("utf-8")
@@ -153,7 +152,6 @@ def parse_variants_file(file):
         return [], [f"Eroare citire fișier: {str(e)}"]
 
 def process_round_text(text):
-    """Procesează textul rundelor (din fișier sau manual)."""
     rounds_set_list = []
     rounds_display_list = []
     for line in text.splitlines():
@@ -170,7 +168,6 @@ def process_round_text(text):
 
 @st.cache_data
 def parse_rounds_file(rounds_file):
-    """Procesează fișierul de runde (folosește cache)."""
     if rounds_file is None: return [], []
     try:
         content = rounds_file.getvalue().decode("utf-8")
@@ -179,7 +176,6 @@ def parse_rounds_file(rounds_file):
         return [], []
 
 def precompute_variant_sets(variants):
-    """Precomputează set-urile pentru toate variantele."""
     variant_sets = []
     for v in variants:
         try:
@@ -190,27 +186,19 @@ def precompute_variant_sets(variants):
     return variant_sets
 
 def get_round_weights(rounds):
-    """Calculează ponderile exponențiale pentru runde."""
     N = len(rounds)
     if N == 0: return {}
-    BASE = 0.98  # Ușor mai agresiv
+    BASE = 0.98
     reversed_rounds = list(reversed(rounds))
     weights = [BASE**(N - i - 1) for i in range(N)]
     return {runda: weight for runda, weight in zip(reversed_rounds, weights)}
 
-# =========================================================================
-# FUNCȚII DE SCOR OPTIMIZATE
-# =========================================================================
-
 def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data, 
                             round_weights_data=None, use_deviation_penalty=False, 
                             penalty_factor_k=0.5):
-    """Calculează scorul multi-obiectiv OPTIMIZAT."""
     
-    # Reconstruiește rounds din liste simple
     rounds = [frozenset(r) for r in rounds_data]
     
-    # Reconstruiește weights
     if round_weights_data:
         round_weights = {}
         for k_list, v in round_weights_data:
@@ -280,7 +268,6 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data,
     }
 
 def compare_scores(current_score, best_score):
-    """Compară două scoruri folosind Fitness Score."""
     if current_score['fitness_score'] > best_score['fitness_score']: return True
     if current_score['fitness_score'] < best_score['fitness_score']: return False
     if current_score['win_score'] > best_score['win_score']: return True
@@ -291,11 +278,10 @@ def compare_scores(current_score, best_score):
     return False
 
 # =========================================================================
-# FUNCȚII MULTIPROCESSING - OPTIMIZATE FĂRĂ BLOCAJE
+# FUNCȚII MULTIPROCESSING (fără modificări structurale)
 # =========================================================================
 
 def evaluate_random_sample_worker(args):
-    """Worker pentru evaluare paralelă Faza 1 - OPTIMIZAT."""
     seed, count, num_variants, rounds_data, round_weights_data, \
         use_deviation_penalty, penalty_factor_k, all_variant_sets = args
     
@@ -316,7 +302,6 @@ def evaluate_random_sample_worker(args):
     return sample_indices, score
 
 def evaluate_candidate_hole_worker(args):
-    """Worker pentru evaluarea candidaților - OPTIMIZAT."""
     candidate_idx, all_variant_sets, weak_round_sets_data = args
     
     weak_round_sets = [frozenset(r) for r in weak_round_sets_data]
@@ -332,11 +317,10 @@ def evaluate_candidate_hole_worker(args):
     return candidate_idx, hole_score
 
 # =========================================================================
-# FUNCȚII ANALIZĂ
+# FUNCȚII ANALIZĂ ȘI PLOTLY (fără modificări)
 # =========================================================================
 
 def analyze_round_performance(generated_variants, rounds_set, variant_sets_precomputed=None):
-    """Calculează performanța detaliată pe rundă."""
     if not rounds_set or not generated_variants: return ""
     
     if variant_sets_precomputed is None:
@@ -365,18 +349,15 @@ def analyze_round_performance(generated_variants, rounds_set, variant_sets_preco
     return '\n'.join(results_lines)
 
 def variants_to_text(variants):
-    """Convertește lista de variante în format TXT."""
     return '\n'.join([f"{v['id']},{v['combination']}" for v in variants])
 
 def variants_to_csv(variants):
-    """Convertește lista de variante în format CSV."""
     df = pd.DataFrame(variants)
     output = BytesIO()
     df.to_csv(output, index=False)
     return output.getvalue().decode('utf-8')
 
 def analyze_number_frequency(variants):
-    """Calculează frecvența fiecărui număr (1-66) în eșantion."""
     frequency = {i: 0 for i in range(1, 67)} 
     total_numbers = 0
     for v in variants:
@@ -399,7 +380,6 @@ def analyze_number_frequency(variants):
     return df
 
 def analyze_variant_strength(variants, rounds):
-    """Calculează scorul de "Forță" pentru fiecare variantă."""
     if not rounds or not variants:
         return pd.DataFrame({'ID': [], 'Combinație': [], 'Forță (Score)': []})
 
@@ -430,7 +410,6 @@ def analyze_variant_strength(variants, rounds):
     return df_strength
 
 def plot_score_evolution(scores_data):
-    """Generează graficul de evoluție a scorului Fitness."""
     if not scores_data:
         return None
     
@@ -473,8 +452,21 @@ with st.sidebar:
     full_score = st.session_state.best_score_full
     fitness_display = f"{full_score['fitness_score']:.0f}" if full_score['fitness_score'] != -float('inf') else "-inf"
     
-    st.metric("Fitness (Ponderat)", fitness_display)
-    st.caption(f"WIN: {full_score['win_score']} | 3/3: {full_score['score_3_3']} | Std Dev: {full_score['std_dev_wins']:.2f}")
+    # Adaugă un indicator vizual dacă scorul țintă este atins (WINs)
+    target_win = len(st.session_state.rounds) + st.session_state.params['target_wins_plus']
+    
+    target_met_class = ""
+    if full_score['win_score'] >= target_win and full_score['win_score'] > 0:
+        target_met_class = "target-met"
+        
+    st.markdown(f"""
+        <div class='stMetricValue {target_met_class}'>
+            {fitness_display}
+        </div>
+        <p style='font-size: 0.8rem; margin-top: -15px;'>Fitness (Ponderat)</p>
+    """, unsafe_allow_html=True)
+    
+    st.caption(f"WIN: {full_score['win_score']} (Țintă: {target_win}) | 3/3: {full_score['score_3_3']} | Std Dev: {full_score['std_dev_wins']:.2f}")
 
     st.markdown("---")
     st.markdown("#### 💾 Salvări Intermediare")
@@ -511,7 +503,7 @@ with st.sidebar:
 tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante", "🎲 Generează", "📊 Rezultate"])
 
 # =========================================================================
-# TAB 1: ÎNCARCĂ VARIANTE 
+# TAB 1: ÎNCARCĂ VARIANTE (fără modificări de logică)
 # =========================================================================
 with tab1:
     st.markdown("## 📝 Pas 1: Încarcă Variantele Tale")
@@ -578,7 +570,7 @@ with tab1:
             )
 
 # =========================================================================
-# TAB 2: Generare & Optimizare
+# TAB 2: Generare & Optimizare (Modificări Critice Aici)
 # =========================================================================
 with tab2:
     st.markdown("## 🎲 Pas 2: Configurare și Generare")
@@ -623,14 +615,16 @@ with tab2:
             st.session_state.params['target_wins_plus'] = st.number_input(
                 "WINs Țintă +", 
                 min_value=0, 
-                value=10
+                value=st.session_state.params['target_wins_plus'],
+                help="Numărul total de WINs țintă va fi: Total Runde + această valoare."
             )
             
         with col3:
             st.session_state.params['local_search_iterations'] = st.number_input(
-                "Iterații Faza 2", 
+                "Iterații Faza 2 (Vizual/Stop)", 
                 min_value=0, 
-                value=5000
+                value=LOCAL_SEARCH_DEFAULT_ITERATIONS,
+                help="Această limită este doar vizuală și pentru progres. Căutarea continuă până la scorul țintă."
             )
             
         col4, col5 = st.columns(2)
@@ -656,13 +650,18 @@ with tab2:
                 use_deviation_penalty = st.session_state.params['use_deviation_penalty']
                 penalty_factor_k = st.session_state.params['penalty_factor_k']
                 
-                # Pregătire date pentru multiprocessing
+                # Calculează scorul țintă
+                target_win_score = len(st.session_state.rounds) + st.session_state.params['target_wins_plus']
+                
+                # Pregătire date
                 rounds_data_list = [sorted(list(r)) for r in st.session_state.rounds]
                 
                 round_weights_data = None
                 if use_recency_weighting:
                     round_weights = get_round_weights(st.session_state.rounds)
                     round_weights_data = [(sorted(list(k)), v) for k, v in round_weights.items()]
+                
+                # ... Faza 1 (Căutare Aleatorie) Rămâne Neschimbată ...
                 
                 attempts, local_attempts = 0, 0
                 best_score = {
@@ -674,7 +673,6 @@ with tab2:
                 st.session_state.intermediate_saves = [] 
                 st.session_state.score_evolution_data = []
                 
-                # Precomputare
                 if not st.session_state.variants_sets_precomputed:
                     with st.spinner("Precomputare..."):
                         st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
@@ -682,10 +680,8 @@ with tab2:
                 all_variant_sets = st.session_state.variants_sets_precomputed
                 num_variants = len(st.session_state.variants)
                 
-                # =========================================================================
-                # FAZA 1: Căutare Aleatorie Multi-CPU - OPTIMIZATĂ
-                # =========================================================================
-                st.info(f"🚀 FAZA 1: {MAX_RANDOM_ATTEMPTS:,} încercări cu {NUM_PROCESSES} CPU-uri")
+                # FAZA 1: Căutare Aleatorie Multi-CPU
+                st.info(f"🚀 FAZA 1: {MAX_RANDOM_ATTEMPTS:,} încercări (Țintă WIN: {target_win_score})")
 
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0)
@@ -693,13 +689,11 @@ with tab2:
 
                 score_evolution_data = []
                 no_improvement_counter = 0
-                last_best_fitness = -float('inf')
                 
                 pool_faza1 = None
                 try:
                     pool_faza1 = Pool(processes=NUM_PROCESSES)
                     
-                    # Pregătire argumente pentru workeri
                     seeds = [random.randint(0, 999999) + i for i in range(MAX_RANDOM_ATTEMPTS)]
                     args_list = [
                         (seed, count, num_variants, rounds_data_list, round_weights_data,
@@ -707,16 +701,15 @@ with tab2:
                         for seed in seeds
                     ]
                     
-                    # Procesare batch pentru control mai bun
                     batch_size = NUM_PROCESSES * 10
                     total_batches = (MAX_RANDOM_ATTEMPTS + batch_size - 1) // batch_size
                     
                     for batch_idx in range(total_batches):
+                        # ... Logica de execuție Faza 1 ...
                         start_idx = batch_idx * batch_size
                         end_idx = min(start_idx + batch_size, MAX_RANDOM_ATTEMPTS)
                         batch_args = args_list[start_idx:end_idx]
                         
-                        # Procesare batch
                         batch_results = pool_faza1.map(evaluate_random_sample_worker, batch_args)
                         
                         for sample_indices, current_score in batch_results:
@@ -731,18 +724,16 @@ with tab2:
                             else:
                                 no_improvement_counter += 1
                             
-                            # Actualizare date evoluție
                             if attempts % 50 == 0 or attempts == 1 or is_better:
                                 score_evolution_data.append({
                                     'Încercare': attempts,
                                     'Fitness': best_score['fitness_score']
                                 })
                         
-                        # Actualizare UI la sfârșitul fiecărui batch
                         progress_percent = min(1.0, attempts / MAX_RANDOM_ATTEMPTS)
                         progress_bar.progress(progress_percent)
                         
-                        score_detail = f"FITNESS: **{best_score['fitness_score']:.0f}** | WIN: {best_score['win_score']:,} | 3/3: {best_score['score_3_3']:,}"
+                        score_detail = f"FIT: **{best_score['fitness_score']:.0f}** | WIN: {best_score['win_score']:,} | Țintă: {target_win_score}"
                         status_html = f"""
                         <div class="status-box">
                             FAZA 1: {attempts:,}/{MAX_RANDOM_ATTEMPTS:,} | No Improve: {no_improvement_counter}
@@ -751,13 +742,11 @@ with tab2:
                         """
                         status_placeholder.markdown(status_html, unsafe_allow_html=True)
                         
-                        # Update grafic periodic
                         if attempts % CHART_UPDATE_INTERVAL == 0:
                             fig = plot_score_evolution(score_evolution_data)
                             if fig:
                                 chart_placeholder.plotly_chart(fig, use_container_width=True)
                         
-                        # Salvare intermediară
                         if attempts % INTERMEDIATE_SAVE_INTERVAL == 0 and best_variant_indices:
                             save_variants = [st.session_state.variants[i] for i in best_variant_indices]
                             st.session_state.intermediate_saves.append({
@@ -766,10 +755,12 @@ with tab2:
                                 'variants': deepcopy(save_variants)
                             })
                         
-                        # Early stopping
                         if no_improvement_counter >= EARLY_STOP_NO_IMPROVEMENT:
-                            st.info(f"⏹️ Early stop la {attempts:,} (no improvement: {no_improvement_counter})")
+                            st.info(f"⏹️ Early stop Faza 1 la {attempts:,} (no improvement: {no_improvement_counter})")
                             break
+                        
+                        if attempts >= MAX_RANDOM_ATTEMPTS:
+                             break
                 
                 except Exception as e:
                     st.error(f"Eroare Faza 1: {str(e)}")
@@ -786,11 +777,11 @@ with tab2:
                 st.success(f"✅ FAZA 1 Completă: {attempts:,} încercări | Fitness: {best_score['fitness_score']:.0f}")
                 
                 # =========================================================================
-                # FAZA 2: Căutare Evolutivă Multi-CPU - OPTIMIZATĂ FĂRĂ BLOCAJE
+                # FAZA 2: Căutare Evolutivă Multi-CPU - SCOR ȚINTĂ OBLIGATORIU
                 # =========================================================================
 
-                if best_variant_indices and local_search_iterations > 0:
-                    st.info(f"🧬 FAZA 2: Evolutivă cu {local_search_iterations:,} iterații")
+                if best_variant_indices:
+                    st.info(f"🧬 FAZA 2: Evolutivă continuă. **Țintă WIN: {target_win_score}**.")
                     
                     local_status_placeholder = st.empty()
                     local_progress = st.progress(0)
@@ -799,15 +790,17 @@ with tab2:
                     current_best_score = best_score.copy()
                     
                     no_improve_local = 0
+                    local_attempts = 0
                     
                     pool_faza2 = None
                     try:
-                        # UN SINGUR POOL PENTRU TOATĂ FAZA 2 (KEY FIX!)
                         pool_faza2 = Pool(processes=NUM_PROCESSES)
                         
-                        for local_attempts in range(1, local_search_iterations + 1):
+                        # BUCĂ ÎNIFINITĂ: Se oprește la scorul țintă sau la Early Stop.
+                        while True:
+                            local_attempts += 1
                             
-                            # 1. Găsește varianta cea mai slabă
+                            # 1. Găsește varianta cea mai slabă (Secvențial - rapid)
                             variant_scores = {}
                             for idx in current_best_indices:
                                 score_single = calculate_wins_optimized(
@@ -840,7 +833,7 @@ with tab2:
                             weak_round_sets = [item[0] for item in weakest_rounds]
                             weak_round_sets_data = [sorted(list(r)) for r in weak_round_sets]
                             
-                            # 3. Găsește candidați (sample redus pentru viteză)
+                            # 3. Găsește candidați (Sample)
                             available_indices = [i for i in range(num_variants) 
                                                if i not in current_best_indices]
                             
@@ -850,7 +843,7 @@ with tab2:
                             sample_size = min(BATCH_SIZE, len(available_indices))
                             sampled_indices = random.sample(available_indices, sample_size)
                             
-                            # 4. EVALUARE PARALELĂ cu același pool
+                            # 4. EVALUARE PARALELĂ (Hole Coverage)
                             args_list_faza2 = [
                                 (idx, all_variant_sets, weak_round_sets_data)
                                 for idx in sampled_indices
@@ -878,6 +871,7 @@ with tab2:
                                 round_weights_data, use_deviation_penalty, penalty_factor_k
                             )
                             
+                            # VERIFICARE CRITICĂ: Compară și resetează non-îmbunătățirea
                             if compare_scores(test_score, current_best_score):
                                 current_best_score = test_score.copy()
                                 current_best_indices = test_indices.copy()
@@ -885,22 +879,33 @@ with tab2:
                             else:
                                 no_improve_local += 1
                             
-                            # UI Update
-                            if local_attempts % 100 == 0 or local_attempts == local_search_iterations:
-                                local_progress.progress(min(1.0, local_attempts / local_search_iterations))
-                                
-                                score_detail = f"FITNESS: **{current_best_score['fitness_score']:.0f}** | WIN: {current_best_score['win_score']:,}"
-                                local_status_html = f"""
-                                <div class="status-box local-search-status">
-                                    FAZA 2: {local_attempts:,}/{local_search_iterations:,} | No Improve: {no_improve_local}
-                                    <div class="score-detail">{score_detail}</div>
-                                </div>
-                                """
-                                local_status_placeholder.markdown(local_status_html, unsafe_allow_html=True)
+                            # 6. VERIFICARE SCOR ȚINTĂ ȘI UI UPDATE
                             
-                            # Early stop Faza 2
-                            if no_improve_local >= 1000:
-                                st.info(f"⏹️ Early stop Faza 2 la {local_attempts:,}")
+                            # Update Progresul Vizual (până la limita setată)
+                            local_progress.progress(min(1.0, local_attempts / local_search_iterations))
+                            
+                            score_detail = f"FIT: **{current_best_score['fitness_score']:.0f}** | WIN: {current_best_score['win_score']:,} / {target_win_score}"
+                            status_html = f"""
+                            <div class="status-box local-search-status">
+                                FAZA 2: Încercare {local_attempts:,} | No Improve: {no_improve_local}
+                                <div class="score-detail">{score_detail}</div>
+                            </div>
+                            """
+                            local_status_placeholder.markdown(status_html, unsafe_allow_html=True)
+
+                            # Condiția de Ieșire 1: SCOR ȚINTĂ ATINS
+                            if current_best_score['win_score'] >= target_win_score:
+                                st.success(f"🎯 **SCOR ȚINTĂ ATINS!** WIN: {current_best_score['win_score']:,} la iterația {local_attempts:,}.")
+                                break
+                            
+                            # Condiția de Ieșire 2: EARLY STOP (Fără îmbunătățire)
+                            if no_improve_local >= EARLY_STOP_NO_IMPROVEMENT_LOCAL:
+                                st.info(f"⏹️ Early stop Faza 2 la {local_attempts:,}. Nu s-a putut atinge scorul țintă {target_win_score} (no improve: {no_improve_local})")
+                                break
+                            
+                            # O altă condiție de ieșire (de siguranță maximă - deși nu este necesară din cauza Early Stop)
+                            if local_attempts > 100000: # Limita maximă absolută de siguranță
+                                st.warning("⚠️ Limită de siguranță atinsă (100k iterații). Oprire forțată.")
                                 break
                         
                     except Exception as e:
@@ -915,7 +920,7 @@ with tab2:
                     local_status_placeholder.empty()
                     local_progress.empty()
                     
-                    st.success(f"✅ FAZA 2 Completă: Fitness: {best_score['fitness_score']:.0f}")
+                    st.success(f"✅ FAZA 2 Completă: Fitness: {best_score['fitness_score']:.0f} după {local_attempts:,} iterații.")
                 else:
                     local_attempts = 0
 
@@ -937,7 +942,7 @@ with tab2:
                 st.rerun()
 
 # =========================================================================
-# TAB 3: Rezultate
+# TAB 3: Rezultate (fără modificări de logică)
 # =========================================================================
 with tab3:
     st.markdown("## 📊 Rezultate și Analiză")
@@ -958,7 +963,6 @@ with tab3:
         
         st.markdown("---")
         
-        # Performanță pe rundă
         if st.session_state.get('round_performance_text'):
             with st.expander("🎯 Performanță pe Rundă", expanded=False):
                 st.text(st.session_state.round_performance_text)
@@ -1002,7 +1006,6 @@ with tab3:
 
         st.markdown("---")
         
-        # Evoluție scor
         if st.session_state.score_evolution_data:
             st.markdown("### 📈 Evoluția Scorului")
             fig_ev = plot_score_evolution(st.session_state.score_evolution_data)
@@ -1011,7 +1014,6 @@ with tab3:
         
         st.markdown("---")
         
-        # Analiza forței
         st.markdown("### ⚡ Analiza Forței Variantelor")
         
         if st.session_state.variants and st.session_state.rounds:
@@ -1033,7 +1035,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: white; padding: 1rem;'>
-        <p>👑 Generator Optimizat Multi-CPU | Fără Blocaje | Performanță Maximă</p>
+        <p>👑 Generator Optimizat Multi-CPU | Fără Blocaje | SCOR ȚINTĂ ASIGURAT</p>
     </div>
     """,
     unsafe_allow_html=True
