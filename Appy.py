@@ -13,7 +13,7 @@ import sys
 import math
 
 # =========================================================================
-# CONSTANTE ȘI CONFIGURARE PAGINĂ (AJUSTATE PENTRU 12/66)
+# CONSTANTE ȘI CONFIGURARE PAGINĂ (AJUSTATE PENTRU FLEXIBILITATE RUNDE)
 # =========================================================================
 
 # CONSTANTE DE VITEZĂ ȘI RESURSE
@@ -21,19 +21,18 @@ MAX_RANDOM_ATTEMPTS = 50000
 NUM_PROCESSES = max(1, cpu_count() - 1)
 CHART_UPDATE_INTERVAL = 1000
 EARLY_STOP_NO_IMPROVEMENT = 5000 
-MAX_PERTURB_ITERATIONS = 5000 
 
-# CONSTANTE DE SCOR ȘI LOTERIE (AJUSTATE)
+# CONSTANTE DE SCOR ȘI LOTERIE 
 PENALTY_FACTOR_K = 0.5 
 NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
 LOTTERY_MAX_NUMBER = 66
-# RUNDE: Trebuie să aibă EXACT 12 numere
-LOTTERY_ROUND_NUMBERS = 12 
-# VARIANTE: Presupunem că varianta minimă de joc este 4 numere (sau setată de utilizator)
+# NOU: Rundele sunt flexibile. Validăm MINIMUM 2 numere pentru a evita linii goale/inutile.
+LOTTERY_ROUND_MIN_NUMBERS_FLEX = 2 
+# VARIANTE: Minim 4 numere pentru o variantă de joc (6/66, 12/66, etc.)
 LOTTERY_VARIANT_MIN_NUMBERS = 4 
 
 st.set_page_config(
-    page_title="Generator Variante Loterie (12/66)",
+    page_title="Generator Variante Loterie (FLEXIBIL)",
     page_icon="👑",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -62,7 +61,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================================================================
-# INITIALIZARE SESIUNE (Am păstrat logica generală)
+# INITIALIZARE SESIUNE
 # =========================================================================
 
 if 'variants' not in st.session_state: st.session_state.variants = []
@@ -93,9 +92,9 @@ if 'round_performance_text' not in st.session_state:
     st.session_state.round_performance_text = ""
 if 'rounds_parse_errors' not in st.session_state:
     st.session_state.rounds_parse_errors = []
-    
+
 # =========================================================================
-# FUNCȚII UTILITY ȘI SCOR (LOGICA WIN ADAPTATĂ PENTRU 12/66)
+# FUNCȚII UTILITY ȘI SCOR (LOGICA WIN PĂSTRATĂ)
 # =========================================================================
 
 def precompute_variant_sets(variants):
@@ -139,10 +138,7 @@ def calculate_wins_optimized(indices, all_variant_sets, rounds_data_list, round_
                              use_deviation_penalty=True, penalty_factor_k=PENALTY_FACTOR_K):
     """Calculează scorul de Fitness complet pentru un set de indici.
     
-    WIN logic (ajustat pentru 12/66):
-    - WIN: 4 sau mai multe meciuri (acoperă 4/12, 5/12, etc.)
-    - 3/3: 3 meciuri (3/12)
-    - 2/2: 2 meciuri (2/12)
+    WIN logic: 4+ meciuri, 3/3, 2/2.
     """
     
     current_variant_sets = [all_variant_sets[i] for i in indices]
@@ -168,7 +164,7 @@ def calculate_wins_optimized(indices, all_variant_sets, rounds_data_list, round_
         for v_set in current_variant_sets:
             matches = calculate_match_score(v_set, runda_set)
             
-            # Presupunem că 4+ meciuri reprezintă câștigul principal
+            # 4+ matches are considered WINs for general coverage calculation
             if matches >= 4: round_wins += 1
             elif matches == 3: round_3_3 += 1
             elif matches == 2: round_2_2 += 1
@@ -213,9 +209,8 @@ def compare_scores(score1, score2):
         return True
     return False
 
-# ... (restul funcțiilor de plot și analiză rămân aceleași) ...
 def plot_score_evolution(data):
-    # ... (unchanged) ...
+    """Generează graficul de evoluție a scorului de Fitness."""
     if not data: return None
     df = pd.DataFrame(data)
     fig = px.line(df, x='Încercare', y='Fitness', title='Evoluția Scorului de Fitness')
@@ -226,7 +221,7 @@ def plot_score_evolution(data):
     return fig
 
 def analyze_round_performance(generated_variants, rounds, generated_sets):
-    # ... (unchanged) ...
+    """Analizează și formatează performanța finală pe rundă."""
     rounds_data_list = [sorted(list(r)) for r in rounds]
     performance_list = []
     for r_data in rounds_data_list:
@@ -252,7 +247,7 @@ def analyze_round_performance(generated_variants, rounds, generated_sets):
     output += df_sorted.to_string(index=False)
     return output
 
-# --- FUNCȚII DE PARSARE ȘI VALIDARE (AJUSTATE) ---
+# --- FUNCȚII DE PARSARE ȘI VALIDARE ---
 
 def validate_variant_set(numbers, variant_id, min_numbers=LOTTERY_VARIANT_MIN_NUMBERS, max_value=LOTTERY_MAX_NUMBER):
     """Verifică dacă un set de numere (variante) este valid."""
@@ -338,8 +333,7 @@ def parse_variants_file(file):
 
 def process_round_text(text):
     """
-    Procesează textul rundelor (12 numere).
-    Validare strictă: EXACT 12 numere, 1-66.
+    MODIFICAT: Procesează textul rundelor FĂRĂ restricție pe numărul de numere (doar 1-66).
     """
     rounds_set = set()
     rounds_raw_list = []
@@ -359,8 +353,8 @@ def process_round_text(text):
             
             unique_numbers = sorted(list(set(numbers)))
 
-            # VALIDARE CRITICĂ PENTRU 12/66
-            is_valid = (len(unique_numbers) == LOTTERY_ROUND_NUMBERS and 
+            # NOUA VALIDARE: DOAR MINIM 2 NUMERE ȘI ÎN INTERVAL (1-66)
+            is_valid = (len(unique_numbers) >= LOTTERY_ROUND_MIN_NUMBERS_FLEX and 
                         all(1 <= n <= LOTTERY_MAX_NUMBER for n in unique_numbers))
 
             if is_valid:
@@ -370,7 +364,7 @@ def process_round_text(text):
                     rounds_set.add(round_frozenset)
                     rounds_raw_list.append(unique_numbers)
             else:
-                parse_errors.append(f"Linia {i}: Invalidă. Rundă loterie 12/66. Trebuie să aibă EXACT {LOTTERY_ROUND_NUMBERS} nr. în 1-{LOTTERY_MAX_NUMBER}. Găsit: {len(unique_numbers)} nr.")
+                parse_errors.append(f"Linia {i}: Invalidă. Min. {LOTTERY_ROUND_MIN_NUMBERS_FLEX} nr. în 1-{LOTTERY_MAX_NUMBER}. Găsit: {len(unique_numbers)} nr.")
         except Exception as e:
             parse_errors.append(f"Linia {i}: Eroare de parsare. Asigură-te că sunt numere. Detalii: {str(e)}")
             continue
@@ -423,8 +417,8 @@ def evaluate_candidate_hole_worker(args):
 # STREAMLIT UI & LOGIC FLOW 
 # =========================================================================
 
-st.markdown("# 👑 Generator Variante Loterie (12/66 Optimizat)")
-st.markdown("### Sistem 12/66. Variante minime: 4 numere.")
+st.markdown("# 👑 Generator Variante Loterie (Runde FLEXIBILE)")
+st.markdown("### Testează cu număr variabil de numere per rundă (1-66). Variante minime: 4 numere.")
 
 # Sidebar
 with st.sidebar:
@@ -454,13 +448,6 @@ with st.sidebar:
     st.caption(f"WIN: {full_score['win_score']} (Țintă: {target_win}) | 3/3: {full_score['score_3_3']} | Std Dev: {full_score['std_dev_wins']:.2f}")
 
     st.markdown("---")
-    st.markdown("#### 💾 Salvări Intermediare")
-    if st.session_state.intermediate_saves:
-        st.success(f"🎉 {len(st.session_state.intermediate_saves)} eșantioane salvate")
-    else:
-        st.info("Nicio salvare.")
-
-    st.markdown("---")
     if st.button("🗑️ Resetează Tot", use_container_width=True):
         st.session_state.clear()
         st.rerun()
@@ -474,7 +461,6 @@ tab1, tab2, tab3 = st.tabs(["📝 Încarcă Variante", "🎲 Generează", "📊 
 with tab1:
     st.markdown("## 📝 Pas 1: Încarcă Variantele Tale")
     
-    # ... (logica încărcare variante nemodificată major) ...
     upload_method = st.radio("Metodă:", ["📄 Fișier", "⌨️ Text"], horizontal=True, key="upload_method_tab1")
     
     if upload_method == "📄 Fișier":
@@ -536,11 +522,12 @@ with tab2:
     if not st.session_state.variants:
         st.warning("⚠️ Încarcă variante mai întâi!")
     else:
-        st.markdown("### 1. Încarcă Rundele (12/66)")
+        st.markdown("### 1. Încarcă Rundele (FLEXIBIL)")
+        st.info(f"**Validare:** Fiecare rundă trebuie să conțină minim {LOTTERY_ROUND_MIN_NUMBERS_FLEX} numere unice în intervalul 1-{LOTTERY_MAX_NUMBER}.")
         
         col_file, col_manual = st.columns(2)
         rounds_file = col_file.file_uploader("Fișier Runde (Numere spațiate)", type=['txt', 'csv'], key="rounds_uploader")
-        manual_rounds_input = col_manual.text_area(f"Sau adaugă manual (o rundă pe linie, EXACT {LOTTERY_ROUND_NUMBERS} numere)", value=st.session_state.manual_rounds_input, height=100, key="manual_rounds_input_area")
+        manual_rounds_input = col_manual.text_area("Sau adaugă manual (o rundă pe linie, numere spațiate)", value=st.session_state.manual_rounds_input, height=100, key="manual_rounds_input_area")
         st.session_state.manual_rounds_input = manual_rounds_input
         
         # LOGICA DE ÎNCĂRCARE ȘI COMBINARE 
@@ -565,7 +552,7 @@ with tab2:
         st.session_state.rounds = list(all_rounds_set)
         st.session_state.rounds_raw = rounds_raw_list
         
-        st.metric("Total Runde", len(st.session_state.rounds))
+        st.metric("Total Runde Unice", len(st.session_state.rounds))
         
         if st.session_state.rounds_parse_errors:
              st.error(f"Erori la parsarea rundelor: {len(st.session_state.rounds_parse_errors)} linii ignorate.")
@@ -576,7 +563,6 @@ with tab2:
 
         st.markdown("### 2. Configurare Algoritm")
 
-        # ... (Configurare UI rămasă neschimbată) ...
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -611,7 +597,7 @@ with tab2:
         if st.button("🚀 GENEREAZĂ OPTIMIZAT", use_container_width=True, type="primary", key="generate_button"):
             
             if not st.session_state.rounds:
-                st.error(f"Încarcă runde mai întâi! (Trebuie să aibă EXACT {LOTTERY_ROUND_NUMBERS} numere)")
+                st.error(f"Încarcă runde mai întâi! (Minim {LOTTERY_ROUND_MIN_NUMBERS_FLEX} numere, Max {LOTTERY_MAX_NUMBER})")
             else:
                 # --- LOGICA DE OPTIMIZARE (PĂSTRATĂ) ---
                 count = st.session_state.params['count']
@@ -700,7 +686,6 @@ with tab2:
                 # =========================================================================
                 # FAZA 2: Căutare Evolutivă Multi-CPU
                 # =========================================================================
-                # ... (Logica Faza 2 și Faza 3 rămâne neschimbată, bazându-se pe funcțiile de scor actualizate) ...
 
                 if best_variant_indices:
                     st.info("🧬 FAZA 2: Evolutivă continuă (Robustness Focus).")
@@ -733,7 +718,7 @@ with tab2:
                             available_indices = [i for i in range(num_variants) if i not in current_best_indices]
                             if not available_indices: break
                             
-                            sample_size = min(BATCH_SIZE, len(available_indices))
+                            sample_size = min(200, len(available_indices))
                             sampled_indices = random.sample(available_indices, sample_size)
                             
                             if pool_faza2: pool_faza2.close(); pool_faza2.join()
@@ -745,7 +730,7 @@ with tab2:
                             for candidate_idx, hole_score in hole_scores:
                                 if hole_score > max_hole_score: max_hole_score, best_candidate_idx = hole_score, candidate_idx
                                 
-                            if not best_candidate_idx: no_improve_local += 1; 
+                            if not best_candidate_idx: no_improve_local += 1
                             if no_improve_local > 1000: break
                             
                             test_indices = current_best_indices.copy()
@@ -787,7 +772,7 @@ with tab2:
                     current_best_indices = best_variant_indices.copy()
                     current_best_score = best_score.copy()
                     
-                    for perturb_attempts in range(1, MAX_PERTURB_ITERATIONS + 1):
+                    for perturb_attempts in range(1, MAX_RANDOM_ATTEMPTS + 1):
                         available_indices_force = [i for i in range(num_variants) if i not in current_best_indices]
                         if not available_indices_force: break
                         
@@ -808,7 +793,7 @@ with tab2:
                         is_better = compare_scores(test_score, current_best_score)
                         accept_worse = False
                         if not is_better and current_best_score['fitness_score'] != -float('inf'):
-                            current_temperature = 0.01 + 0.09 * (1 - perturb_attempts / MAX_PERTURB_ITERATIONS)
+                            current_temperature = 0.01 + 0.09 * (1 - perturb_attempts / MAX_RANDOM_ATTEMPTS)
                             score_diff = current_best_score['fitness_score'] - test_score['fitness_score']
                             if score_diff > 0:
                                 if (random.random() < current_temperature): accept_worse = True
@@ -820,11 +805,11 @@ with tab2:
                             perturb_type = "Respinsă"
                             
                         score_detail = f"FIT: **{current_best_score['fitness_score']:.0f}** | WIN: {current_best_score['win_score']:,} / {target_win_score}"
-                        status_html = f"""<div class="status-box perturbation-status">FAZA 3: Încercare {perturb_attempts:,}/{MAX_PERTURB_ITERATIONS} | Schimbare: {perturb_type}<div class="score-detail">{score_detail}</div></div>"""
+                        status_html = f"""<div class="status-box perturbation-status">FAZA 3: Încercare {perturb_attempts:,}/{MAX_RANDOM_ATTEMPTS} | Schimbare: {perturb_type}<div class="score-detail">{score_detail}</div></div>"""
                         force_status_placeholder.markdown(status_html, unsafe_allow_html=True)
                         
                         if current_best_score['win_score'] >= target_win_score: break
-                        if perturb_attempts >= MAX_PERTURB_ITERATIONS: break
+                        if perturb_attempts >= MAX_RANDOM_ATTEMPTS: break
                         
                     best_variant_indices = current_best_indices.copy()
                     force_status_placeholder.empty()
@@ -859,7 +844,7 @@ with tab3:
         st.dataframe(df_results)
 
         csv_export = df_results.to_csv(index=False).encode('utf-8')
-        st.download_button("Descărcă Variantele (CSV)", csv_export, "variante_optimizate_12_66.csv", "text/csv", key='download-csv')
+        st.download_button("Descărcă Variantele (CSV)", csv_export, "variante_optimizate_flexi.csv", "text/csv", key='download-csv')
         
         st.markdown("---")
         st.markdown("### 2. Performanța Finală")
