@@ -18,7 +18,8 @@ import sys
 # CONSTANTE DE VITEZĂ ȘI RESURSE
 MAX_RANDOM_ATTEMPTS = 25000 
 INTERMEDIATE_SAVE_INTERVAL = 5000 
-NUM_PROCESSES = max(1, cpu_count() - 1) # Numărul de procese folosite în ambele faze
+# Calculează numărul de procese, lăsând 1 pentru UI
+NUM_PROCESSES = max(1, cpu_count() - 1) 
 CHART_UPDATE_INTERVAL = 500 
 LOCAL_SEARCH_DEFAULT_ITERATIONS = 20000 
 # CONSTANTE DE SCOR
@@ -56,11 +57,12 @@ st.markdown("""
 # INITIALIZARE SESIUNE
 # =========================================================================
 
+# Variabilele de sesiune păstrează starea aplicației
 if 'variants' not in st.session_state: st.session_state.variants = []
 if 'variants_sets_precomputed' not in st.session_state: st.session_state.variants_sets_precomputed = []
 if 'generated_variants' not in st.session_state: st.session_state.generated_variants = []
-if 'rounds' not in st.session_state: st.session_state.rounds = []
-if 'rounds_raw' not in st.session_state: st.session_state.rounds_raw = []
+if 'rounds' not in st.session_state: st.session_state.rounds = [] # Lista de frozenset-uri
+if 'rounds_raw' not in st.session_state: st.session_state.rounds_raw = [] # Lista de string-uri afișabile
 if 'best_score_full' not in st.session_state: 
     st.session_state.best_score_full = {
         'win_score': 0, 'score_3_3': 0, 'score_2_2': 0,
@@ -85,7 +87,7 @@ if 'score_evolution_data' not in st.session_state:
     st.session_state.score_evolution_data = []
 
 # =========================================================================
-# FUNCȚII UTILITY
+# FUNCȚII UTILITY (Inclusiv get_round_weights pentru a rezolva NameError)
 # =========================================================================
 
 def clean_variant_combination(numbers_str):
@@ -130,6 +132,7 @@ def parse_variants(text):
     df = pd.DataFrame(variants)
     if not df.empty:
         df_unique = df.drop_duplicates(subset=['combination']).reset_index(drop=True)
+        # Re-indexare ID-uri după curățare
         df_unique['id'] = (df_unique.index + 1).astype(str)
         final_variants = df_unique.to_dict('records')
         total_inter_duplicates_removed = len(variants) - len(final_variants)
@@ -156,10 +159,11 @@ def process_round_text(text):
     for line in text.splitlines():
         line = line.strip()
         if not line: continue
+        # Extrage numerele ignorând virgule, spații, etc.
         parts = [p.strip() for p in line.replace(',', ' ').split() if p.strip().isdigit()]
         round_numbers = {int(p) for p in parts if p.isdigit()} 
         
-        if len(round_numbers) >= 4:
+        if len(round_numbers) >= 4: # Ignoră rundele cu < 4 numere
             rounds_set_list.append(frozenset(round_numbers))
             display_numbers = ' '.join(map(str, sorted(list(round_numbers))))
             rounds_display_list.append(display_numbers)
@@ -187,7 +191,7 @@ def precompute_variant_sets(variants):
     return variant_sets
 
 def get_round_weights(rounds):
-    """Calculează ponderile exponențiale (Recency Weighting) pentru runde."""
+    """Calculează ponderile exponențiale (Recency Weighting) pentru runde. (Corecție NameError)"""
     N = len(rounds)
     if N == 0: return {}
     BASE = 0.99 
@@ -197,12 +201,20 @@ def get_round_weights(rounds):
 
 
 def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data, round_weights_data=None, use_deviation_penalty=False, penalty_factor_k=0.5):
-    """Calculează scorul multi-obiectiv OPTIMIZAT. Acceptă liste de liste serializabile."""
+    """
+    Calculează scorul multi-obiectiv OPTIMIZAT. 
+    Acceptă liste de liste simple pentru rounds_data (serializabile).
+    all_variant_sets este lista de frozenset-uri (date complexe, dar partajate)
+    """
     
     # Reconstruiește set-urile (CRITIC pentru siguranța pickling-ului)
+    # rounds_data este o listă de liste simple [[n1, n2, ...], ...]
     rounds = [frozenset(r) for r in rounds_data]
+    
+    # Reconstruiește round_weights din chei string înapoi la frozenset (dacă există)
     if round_weights_data:
-        # Reconstruiește cheile frozenset din cheile string
+        # round_weights_data este un dict cu chei string (ex: "{1, 5, 7, ...}")
+        # Evaluarea string-ului ca listă, apoi conversie la frozenset
         round_weights = {frozenset(eval(k)): v for k, v in round_weights_data.items()}
     else:
         round_weights = {r: 1.0 for r in rounds}
@@ -238,8 +250,10 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data, rou
         
         weighted_score_sum += wins_in_round * weight
         
+        # Stocăm cheia ca string serializabil (listă de numere) pentru stocare în Streamlit/Pickle
         score_per_round[str(list(runda_set))] = {'wins': wins_in_round, '3_3': score_3_3_in_round, '2_2': score_2_2_in_round}
         
+    # Calculează lista de scoruri combinate pentru STD DEV (Uniformitate)
     wins_list = [
         (d['wins'] * 1000) + (d['3_3'] * 10) + (d['2_2'] * 1) 
         for d in score_per_round.values()
@@ -248,11 +262,13 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data, rou
     std_dev_wins = statistics.stdev(wins_list) if len(wins_list) > 1 else 0
 
     base_score = weighted_score_sum if round_weights_data else total_wins
+    # Multiplicatori mari pentru prioritizarea WIN > 3/3 > 2/2
     base_score_multi = base_score * 100000 + total_3_3 * 100 + total_2_2 * 1
     
     fitness_score = base_score_multi
     
     if use_deviation_penalty:
+         # Aplica penalizarea pe baza abaterii standard
          fitness_score = base_score_multi - (penalty_factor_k * std_dev_wins * 100000 * 10) 
     
     return {
@@ -268,23 +284,30 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds_data, rou
 def compare_scores(current_score, best_score, target_win_score):
     """Compară două scoruri folosind Fitness Score ca prioritate principală."""
     
+    # 1. Prioritatea maximă: Fitness Score (care include ponderea și penalizarea)
     if current_score['fitness_score'] > best_score['fitness_score']: return True
     if current_score['fitness_score'] < best_score['fitness_score']: return False
         
+    # 2. Tie-breaker: Numărul de WIN-uri brute
     if current_score['win_score'] > best_score['win_score']: return True
     if current_score['win_score'] < best_score['win_score']: return False
         
+    # 3. Tie-breaker: Numărul de 3/3
     if current_score['score_3_3'] > best_score['score_3_3']: return True
     if current_score['score_3_3'] < best_score['score_3_3']: return False
         
+    # 4. Tie-breaker: Numărul de 2/2
     if current_score['score_2_2'] > best_score['score_2_2']: return True
         
     return False
+
+# Restul funcțiilor utilitare (analyze_round_performance, variants_to_text, etc.) rămân la fel
 
 def analyze_round_performance(generated_variants, rounds_set, variant_sets_precomputed=None):
     """Calculează performanța detaliată pe rundă."""
     if not rounds_set or not generated_variants: return ""
     
+    # Precomputarea sau utilizarea celei existente
     if variant_sets_precomputed is None:
         variant_sets = []
         for variant_data in generated_variants:
@@ -361,6 +384,7 @@ def analyze_variant_strength(variants, rounds):
         
         for runda_set in rounds:
             matches = len(variant_set.intersection(runda_set))
+            # Scor ponderat simplu pentru Forță
             if matches >= 4: total_score += 10000
             elif matches == 3: total_score += 100
             elif matches == 2: total_score += 1
@@ -415,7 +439,7 @@ def evaluate_random_sample_worker(seed, count, num_variants, rounds_data, round_
     Worker pentru evaluare paralelă Faza 1. 
     Toate datele mari sunt preluate prin functools.partial.
     
-    Primește: doar Seed (pentru generarea aleatorie), și Indicii
+    Primește: doar Seed (pentru generarea aleatorie), și Indicii.
     """
     
     random.seed(seed)
@@ -514,6 +538,7 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🗑️ Resetează Tot", use_container_width=True):
+        # Soluție pentru a reseta sesiunea
         st.session_state.clear()
         st.rerun()
 
@@ -620,6 +645,7 @@ with tab2:
         rounds_from_file_set, rounds_from_file_raw = parse_rounds_file(rounds_file)
         rounds_from_manual_set, rounds_from_manual_raw = process_round_text(manual_rounds_input)
 
+        # Combină rundele din fișier și manual, asigurând unicitatea bazată pe frozenset
         all_rounds_set_dict = {}
         for r_set, r_raw in zip(rounds_from_file_set, rounds_from_file_raw): 
             all_rounds_set_dict[r_set] = r_raw
@@ -631,6 +657,7 @@ with tab2:
         
         st.metric("Total Runde Unice Încărcate", len(st.session_state.rounds))
         
+        # Secțiune de afișare a performanței pe rundă (se activează după optimizare)
         if st.session_state.rounds_raw and st.session_state.get('round_performance_text'):
             st.markdown("#### 🎯 Performanța Eșantionului pe Rundă")
             performance_html = '<br>'.join([f"<p>{line}</p>" for line in st.session_state.round_performance_text.split('\n')])
@@ -713,15 +740,16 @@ with tab2:
                 use_deviation_penalty = st.session_state.params['use_deviation_penalty']
                 penalty_factor_k = st.session_state.params['penalty_factor_k']
                 
-                # Pregătire date pentru Pickling
+                # 1. Pregătire date pentru Pickling (serializare)
+                # Convertim lista de frozenset-uri (st.session_state.rounds) în listă de liste simple [[n1, n2, ...], ...]
                 rounds_data_list = [list(r) for r in st.session_state.rounds]
                 
+                round_weights_data = None
                 if use_recency_weighting:
                     round_weights = get_round_weights(st.session_state.rounds)
-                    # Convertim cheile (frozenset) la string pentru serializare sigură
+                    # Convertim cheile (frozenset) la string serializabil (listă de numere)
+                    # Ex: frozenset({1, 5}) devine '5, 1' pentru serializare
                     round_weights_data = {str(list(k)): v for k, v in round_weights.items()}
-                else:
-                    round_weights_data = None
                 
                 attempts, local_attempts = 0, 0
                 best_score = deepcopy(st.session_state.best_score_full)
@@ -729,6 +757,7 @@ with tab2:
                 st.session_state.intermediate_saves = [] 
                 st.session_state.score_evolution_data = []
                 
+                # 2. Precomputare set-uri (dacă nu s-a făcut)
                 if not st.session_state.variants_sets_precomputed:
                     with st.spinner("Precomputare set-uri variante..."):
                         st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
@@ -751,16 +780,17 @@ with tab2:
                 try:
                     pool_faza1 = Pool(processes=NUM_PROCESSES)
                     
-                    # Funcția partială care include toate datele mari, imuabile
+                    # Funcția partială: include toate datele mari, imuabile (all_variant_sets, rounds_data, etc.)
+                    # Acestea sunt copiate o singură dată la inițierea fiecărui proces worker.
                     worker_func_faza1 = partial(
                         evaluate_random_sample_worker,
                         count=count,
                         num_variants=num_variants,
-                        rounds_data=rounds_data_list,
-                        round_weights_data=round_weights_data,
+                        rounds_data=rounds_data_list, # Lista de liste simple (safe)
+                        round_weights_data=round_weights_data, # Dict cu chei string (safe)
                         use_deviation_penalty=use_deviation_penalty,
                         penalty_factor_k=penalty_factor_k,
-                        all_variant_sets=all_variant_sets
+                        all_variant_sets=all_variant_sets # Lista de frozenset-uri
                     )
                     
                     # Trimitere doar a argumentelor simple (seed) către Pool.map
@@ -777,7 +807,7 @@ with tab2:
                             best_score = current_score.copy()
                             best_variant_indices = sample_indices
                         
-                        # 1. ACTUALIZARE GRAFIC
+                        # Actualizare UI (Graic, Status, Progres)
                         if attempts % 100 == 0 or attempts == 1 or is_better:
                             score_evolution_data.append({
                                 'Încercare': attempts,
@@ -788,8 +818,6 @@ with tab2:
                             fig = plot_score_evolution(score_evolution_data)
                             if fig:
                                 chart_placeholder.plotly_chart(fig, use_container_width=True)
-                        
-                        # 2. ACTUALIZARE UI STATUS & PROGRES
                         
                         if attempts % 500 == 0 or attempts == MAX_RANDOM_ATTEMPTS:
                             progress_percent = min(1.0, attempts / MAX_RANDOM_ATTEMPTS)
@@ -804,8 +832,8 @@ with tab2:
                             """
                             status_placeholder.markdown(status_html, unsafe_allow_html=True)
                             
-                        # 3. LOGICĂ DE SALVARE INTERMEDIARĂ
-                        if attempts % INTERMEDIATE_SAVE_INTERVAL == 0:
+                        # Logica de salvare intermediară
+                        if attempts % INTERMEDIATE_SAVE_INTERVAL == 0 and best_variant_indices:
                             save_variants = [st.session_state.variants[i] for i in best_variant_indices]
                             st.session_state.intermediate_saves.append({
                                 'attempt': attempts,
@@ -814,11 +842,11 @@ with tab2:
                             })
                             st.sidebar.caption(f"Salvare la {attempts:,} încercări.")
                             
-                        # Oprire garantată după MAX_RANDOM_ATTEMPTS
                         if attempts >= MAX_RANDOM_ATTEMPTS:
                             break
                 
                 finally:
+                    # CURĂȚAREA POOL-ULUI ESTE CRITICĂ
                     if pool_faza1:
                         pool_faza1.terminate()
                         pool_faza1.join()
@@ -839,19 +867,17 @@ with tab2:
                     current_best_indices = best_variant_indices.copy()
                     current_best_score = best_score.copy()
                     
-                    # Folosim Pool pentru Faza 2
                     pool_faza2 = None
                     try:
                         pool_faza2 = Pool(processes=NUM_PROCESSES)
-                        
-                        round_weights_local = get_round_weights(st.session_state.rounds) if use_recency_weighting else None
                         
                         for local_attempts in range(1, local_search_iterations + 1):
                             
                             # 1. Identificare varianta cea mai slabă din eșantion (secvențial)
                             variant_scores = {}
-                            # Atenție: apelăm calculate_wins_optimized cu lista de frozenset-uri direct (NU worker paralel)
+                            # Folosim funcția de scor direct pe fiecare variantă din eșantionul curent
                             for idx in current_best_indices:
+                                # Nu este nevoie de paralelizare aici; eșantionul e mic (count)
                                 score_single = calculate_wins_optimized(
                                     [idx], all_variant_sets, rounds_data_list, round_weights_data
                                 )
@@ -862,12 +888,11 @@ with tab2:
                             weakest_position = current_best_indices.index(weakest_idx)
                             
                             # 2. Identificare rundele cele mai slab acoperite (găurile)
-                            # Reconstruim cheile frozenset pentru că best_score['score_per_round'] folosește chei string
-                            
                             score_per_round_frozenset = {
                                 frozenset(eval(k)): v for k, v in current_best_score['score_per_round'].items()
                             }
                             
+                            # Sortează și selectează cele mai slabe runde
                             weakest_rounds = sorted(
                                 score_per_round_frozenset.items(),
                                 key=lambda item: item[1]['wins'] * 1000 + item[1]['3_3'] * 10 + item[1]['2_2']
@@ -875,7 +900,7 @@ with tab2:
                             
                             weak_round_sets = [item[0] for item in weakest_rounds]
                             
-                            # CRITIC: Asigurăm serializarea ca listă de liste simple de numere
+                            # CRITIC: Asigură serializarea ca listă de liste simple de numere
                             weak_round_sets_data = [list(r) for r in weak_round_sets]
                             
                             # 3. Caută cel mai bun candidat din pool-ul mare (Eșantionare 1000)
@@ -891,7 +916,7 @@ with tab2:
                             worker_func_faza2 = partial(
                                 evaluate_candidate_hole_worker, 
                                 all_variant_sets=all_variant_sets, 
-                                weak_round_sets_data=weak_round_sets_data
+                                weak_round_sets_data=weak_round_sets_data # Lista de liste simple (safe)
                             )
 
                             # EVALUARE PARALELĂ: Trimiți doar lista de indici
@@ -933,6 +958,7 @@ with tab2:
                                 local_status_placeholder.markdown(local_status_html, unsafe_allow_html=True)
                         
                     finally:
+                        # CURĂȚAREA POOL-ULUI ESTE CRITICĂ
                         if pool_faza2:
                             pool_faza2.terminate()
                             pool_faza2.join()
@@ -948,6 +974,7 @@ with tab2:
                 st.session_state.generated_variants = [st.session_state.variants[i] for i in best_variant_indices]
                 st.session_state.best_score_full = best_score
                 
+                # Calculează performanța finală pe rundă pentru afișare
                 generated_sets = [all_variant_sets[i] for i in best_variant_indices]
                 performance_text = analyze_round_performance(
                     st.session_state.generated_variants, 
