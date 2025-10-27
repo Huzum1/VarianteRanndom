@@ -13,26 +13,26 @@ import sys
 import math
 
 # =========================================================================
-# CONSTANTE ȘI CONFIGURARE PAGINĂ (AJUSTATE PENTRU FLEXIBILITATE RUNDE)
+# CONSTANTE ȘI CONFIGURARE PAGINĂ 
 # =========================================================================
 
-# CONSTANTE DE VITEZĂ ȘI RESURSE
+# CONSTANTE DE VITEZĂ ȘI RESURSE (Neschimbate)
 MAX_RANDOM_ATTEMPTS = 50000 
 NUM_PROCESSES = max(1, cpu_count() - 1)
 CHART_UPDATE_INTERVAL = 1000
 EARLY_STOP_NO_IMPROVEMENT = 5000 
 
-# CONSTANTE DE SCOR ȘI LOTERIE 
+# CONSTANTE DE SCOR ȘI LOTERIE (Setări inițiale pentru comparație)
 PENALTY_FACTOR_K = 0.5 
 NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
+# LOTTERY_MAX_NUMBER este folosit doar la validarea variantelor de joc
 LOTTERY_MAX_NUMBER = 66
-# NOU: Rundele sunt flexibile. Validăm MINIMUM 2 numere pentru a evita linii goale/inutile.
-LOTTERY_ROUND_MIN_NUMBERS_FLEX = 2 
-# VARIANTE: Minim 4 numere pentru o variantă de joc (6/66, 12/66, etc.)
+# RUNDE: Fără restricții, dar se folosește LOTTERY_MAX_NUMBER=66 (ca default max)
+# VARIANTE: Minim 4 numere pentru o variantă de joc
 LOTTERY_VARIANT_MIN_NUMBERS = 4 
 
 st.set_page_config(
-    page_title="Generator Variante Loterie (FLEXIBIL)",
+    page_title="Generator Variante Loterie (FĂRĂ RESTRICȚII RUNDE)",
     page_icon="👑",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -61,7 +61,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =========================================================================
-# INITIALIZARE SESIUNE
+# INITIALIZARE SESIUNE (Neschimbată)
 # =========================================================================
 
 if 'variants' not in st.session_state: st.session_state.variants = []
@@ -94,7 +94,7 @@ if 'rounds_parse_errors' not in st.session_state:
     st.session_state.rounds_parse_errors = []
 
 # =========================================================================
-# FUNCȚII UTILITY ȘI SCOR (LOGICA WIN PĂSTRATĂ)
+# FUNCȚII UTILITY ȘI SCOR (Logica WIN și Match rămasă la fel)
 # =========================================================================
 
 def precompute_variant_sets(variants):
@@ -247,7 +247,7 @@ def analyze_round_performance(generated_variants, rounds, generated_sets):
     output += df_sorted.to_string(index=False)
     return output
 
-# --- FUNCȚII DE PARSARE ȘI VALIDARE ---
+# --- FUNCȚII DE PARSARE ȘI VALIDARE VARIANTE (Păstrată) ---
 
 def validate_variant_set(numbers, variant_id, min_numbers=LOTTERY_VARIANT_MIN_NUMBERS, max_value=LOTTERY_MAX_NUMBER):
     """Verifică dacă un set de numere (variante) este valid."""
@@ -331,13 +331,16 @@ def parse_variants_file(file):
     except Exception as e:
         return [], [f"Eroare citire fișier: {str(e)}"], 0, 0
 
+# --- FUNCȚII DE PARSARE RUNDE (FĂRĂ RESTRICȚII) ---
+
 def process_round_text(text):
     """
-    MODIFICAT: Procesează textul rundelor FĂRĂ restricție pe numărul de numere (doar 1-66).
+    MODIFICAT: Procesează textul rundelor FĂRĂ NICI O RESTRICȚIE.
+    Doar scoate numerele întregi, elimină duplicatele pe linie și ignoră liniile goale.
     """
     rounds_set = set()
     rounds_raw_list = []
-    parse_errors = []
+    parse_errors = [] # Nu vor exista erori de validare, doar erori de parsare neașteptate
     
     if not text:
         return [], [], []
@@ -349,24 +352,21 @@ def process_round_text(text):
         if not line: continue
         try:
             parts = line.split()
+            # Extrage doar numerele întregi (le tratăm ca int pentru seturi)
             numbers = [int(p.strip()) for p in parts if p.strip().isdigit()]
             
             unique_numbers = sorted(list(set(numbers)))
 
-            # NOUA VALIDARE: DOAR MINIM 2 NUMERE ȘI ÎN INTERVAL (1-66)
-            is_valid = (len(unique_numbers) >= LOTTERY_ROUND_MIN_NUMBERS_FLEX and 
-                        all(1 <= n <= LOTTERY_MAX_NUMBER for n in unique_numbers))
-
-            if is_valid:
+            # NICI O VALIDARE: Acceptăm orice listă de numere (chiar și goală)
+            if unique_numbers: # Ignoră liniile care nu au conținut numeric
                 round_frozenset = frozenset(unique_numbers)
                 
                 if round_frozenset not in rounds_set:
                     rounds_set.add(round_frozenset)
                     rounds_raw_list.append(unique_numbers)
-            else:
-                parse_errors.append(f"Linia {i}: Invalidă. Min. {LOTTERY_ROUND_MIN_NUMBERS_FLEX} nr. în 1-{LOTTERY_MAX_NUMBER}. Găsit: {len(unique_numbers)} nr.")
+            
         except Exception as e:
-            parse_errors.append(f"Linia {i}: Eroare de parsare. Asigură-te că sunt numere. Detalii: {str(e)}")
+            parse_errors.append(f"Linia {i}: Eroare de parsare. Detalii: {str(e)}")
             continue
             
     return list(rounds_set), rounds_raw_list, parse_errors
@@ -380,7 +380,7 @@ def parse_rounds_file(file):
         return [], [], [f"Eroare citire fișier: {str(e)}"]
 
 # =========================================================================
-# FUNCȚII MULTIPROCESSING (NESCHIMBATE)
+# FUNCȚII MULTIPROCESSING (Neschimbate)
 # =========================================================================
 
 def evaluate_random_sample_worker(args):
@@ -417,8 +417,8 @@ def evaluate_candidate_hole_worker(args):
 # STREAMLIT UI & LOGIC FLOW 
 # =========================================================================
 
-st.markdown("# 👑 Generator Variante Loterie (Runde FLEXIBILE)")
-st.markdown("### Testează cu număr variabil de numere per rundă (1-66). Variante minime: 4 numere.")
+st.markdown("# 👑 Generator Variante Loterie (Runde FĂRĂ RESTRICȚII)")
+st.markdown("### Atenție! Validarea rundelor a fost eliminată. Asigură-te că folosești numere corecte pentru analiza dorită.")
 
 # Sidebar
 with st.sidebar:
@@ -465,7 +465,7 @@ with tab1:
     
     if upload_method == "📄 Fișier":
         variants_file = st.file_uploader(
-            "Încarcă fișier (format: ID, numere separate prin virgulă)", 
+            f"Încarcă fișier (Format: ID, numere separate prin virgulă. Variantele necesită min. {LOTTERY_VARIANT_MIN_NUMBERS} nr. în 1-{LOTTERY_MAX_NUMBER})", 
             type=['txt', 'csv'],
             key="variants_file_uploader"
         )
@@ -477,7 +477,7 @@ with tab1:
                 st.session_state.variants = variants_list
                 
                 if errors:
-                    st.error(f"Erori de validare/duplicare găsite: {len(errors)} variante invalide/duplicate.")
+                    st.error(f"Erori de validare/duplicare găsite în variante: {len(errors)} invalide/duplicate.")
                     for err in errors[:10]: st.write(f"- {err}")
                 
                 if st.session_state.variants:
@@ -499,7 +499,7 @@ with tab1:
                 st.session_state.variants = variants_list
                 
                 if errors:
-                    st.error(f"Erori de validare/duplicare găsite: {len(errors)} variante invalide/duplicate.")
+                    st.error(f"Erori de validare/duplicare găsite în variante: {len(errors)} invalide/duplicate.")
                     for err in errors[:10]: st.write(f"- {err}")
                 
                 if st.session_state.variants:
@@ -522,8 +522,8 @@ with tab2:
     if not st.session_state.variants:
         st.warning("⚠️ Încarcă variante mai întâi!")
     else:
-        st.markdown("### 1. Încarcă Rundele (FLEXIBIL)")
-        st.info(f"**Validare:** Fiecare rundă trebuie să conțină minim {LOTTERY_ROUND_MIN_NUMBERS_FLEX} numere unice în intervalul 1-{LOTTERY_MAX_NUMBER}.")
+        st.markdown("### 1. Încarcă Rundele (FĂRĂ RESTRICȚII)")
+        st.warning("⚠️ **ATENȚIE!** Validarea rundelor este DEZACTIVATĂ. Se vor folosi toate numerele întregi detectate.")
         
         col_file, col_manual = st.columns(2)
         rounds_file = col_file.file_uploader("Fișier Runde (Numere spațiate)", type=['txt', 'csv'], key="rounds_uploader")
@@ -540,22 +540,22 @@ with tab2:
         rounds_raw_list = []
         
         for r_set, r_raw in zip(rounds_from_file_set, rounds_from_file_raw):
-            if r_set not in all_rounds_set:
+            if r_set and r_set not in all_rounds_set:
                 all_rounds_set.add(r_set)
                 rounds_raw_list.append(r_raw)
                 
         for r_set, r_raw in zip(rounds_from_manual_set, rounds_from_manual_raw):
-            if r_set not in all_rounds_set:
+            if r_set and r_set not in all_rounds_set:
                 all_rounds_set.add(r_set)
                 rounds_raw_list.append(r_raw)
             
         st.session_state.rounds = list(all_rounds_set)
         st.session_state.rounds_raw = rounds_raw_list
         
-        st.metric("Total Runde Unice", len(st.session_state.rounds))
+        st.metric("Total Runde Unice (cu numere)", len(st.session_state.rounds))
         
         if st.session_state.rounds_parse_errors:
-             st.error(f"Erori la parsarea rundelor: {len(st.session_state.rounds_parse_errors)} linii ignorate.")
+             st.error(f"Erori minore de parsare în runde: {len(st.session_state.rounds_parse_errors)} linii.")
              for err in st.session_state.rounds_parse_errors[:5]: st.caption(f"- {err}")
         
         if len(st.session_state.rounds) > 0 and st.checkbox("Afișează primele 10 runde încărcate"):
@@ -597,7 +597,7 @@ with tab2:
         if st.button("🚀 GENEREAZĂ OPTIMIZAT", use_container_width=True, type="primary", key="generate_button"):
             
             if not st.session_state.rounds:
-                st.error(f"Încarcă runde mai întâi! (Minim {LOTTERY_ROUND_MIN_NUMBERS_FLEX} numere, Max {LOTTERY_MAX_NUMBER})")
+                st.error("Încarcă runde cu conținut numeric mai întâi!")
             else:
                 # --- LOGICA DE OPTIMIZARE (PĂSTRATĂ) ---
                 count = st.session_state.params['count']
@@ -844,7 +844,7 @@ with tab3:
         st.dataframe(df_results)
 
         csv_export = df_results.to_csv(index=False).encode('utf-8')
-        st.download_button("Descărcă Variantele (CSV)", csv_export, "variante_optimizate_flexi.csv", "text/csv", key='download-csv')
+        st.download_button("Descărcă Variantele (CSV)", csv_export, "variante_optimizate_liber.csv", "text/csv", key='download-csv')
         
         st.markdown("---")
         st.markdown("### 2. Performanța Finală")
