@@ -3,25 +3,26 @@ import pandas as pd
 import random
 import time
 from copy import deepcopy
-import plotly.express as px  # Necesită 'plotly' în requirements.txt
+import plotly.express as px
 import statistics
 import numpy as np
 from io import BytesIO
 from multiprocessing import Pool, cpu_count
 from functools import partial
-import sys # Pentru curățare Pool în caz de eroare
+import sys 
 
 # =========================================================================
 # CONSTANTE ȘI CONFIGURARE PAGINĂ
 # =========================================================================
 
-MAX_RANDOM_ATTEMPTS = 120000
+# MODIFICARE CHEIE 1: Setăm limita de căutare aleatorie la 25.000
+MAX_RANDOM_ATTEMPTS = 25000 
 INTERMEDIATE_SAVE_INTERVAL = 5000 
 PENALTY_FACTOR_K = 0.5  
-NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
-# Lăsăm 1 CPU liber pentru UI, dar ne asigurăm că avem minim 1 proces
+NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 20 # Mărim pentru o acoperire mai bună
 NUM_PROCESSES = max(1, cpu_count() - 1)  
-CHART_UPDATE_INTERVAL = 1000 # Actualizează graficul la fiecare 1000 de încercări
+CHART_UPDATE_INTERVAL = 500 # Actualizăm mai des graficul
+LOCAL_SEARCH_DEFAULT_ITERATIONS = 20000 # MODIFICARE CHEIE 2: Mărim iteratiile Fazei 2
 
 st.set_page_config(
     page_title="Generator Variante Loterie (Premium)",
@@ -74,7 +75,7 @@ if 'params' not in st.session_state:
     st.session_state.params = {
         'count': 1165,
         'target_wins_plus': 10,
-        'local_search_iterations': 5000,
+        'local_search_iterations': LOCAL_SEARCH_DEFAULT_ITERATIONS,
         'use_recency_weighting': True,
         'use_deviation_penalty': True,
         'penalty_factor_k': PENALTY_FACTOR_K
@@ -259,8 +260,9 @@ def calculate_wins_optimized(variant_indices, all_variant_sets, rounds, round_we
 
 def compare_scores(current_score, best_score, target_win_score):
     """Compară două scoruri folosind Fitness Score ca prioritate principală."""
-    if current_score['win_score'] >= target_win_score and best_score['win_score'] < target_win_score: 
-        return True
+    # Eliminam comparatia cu target_win_score in Faza 1 pentru a trece rapid in Faza 2
+    # if current_score['win_score'] >= target_win_score and best_score['win_score'] < target_win_score: 
+    #     return True 
     
     if current_score['fitness_score'] > best_score['fitness_score']: return True
     if current_score['fitness_score'] < best_score['fitness_score']: return False
@@ -397,7 +399,7 @@ def plot_score_evolution(scores_data):
         font_color='white',
         xaxis_title='Număr Încercări',
         yaxis_title='Scor Fitness (Log)',
-        yaxis_type='log' # Folosim scara logaritmică pentru a vedea variațiile mici la scoruri mari
+        yaxis_type='log'
     )
     return fig
 
@@ -635,9 +637,10 @@ with tab2:
             
         with col_iterations:
             st.session_state.params['local_search_iterations'] = st.number_input(
-                "Iterații Căutare Evolutivă", 
+                "Iterații Căutare Evolutivă (Faza 2)", 
                 min_value=0, 
-                value=st.session_state.params['local_search_iterations'], 
+                # MODIFICARE CHEIE 2: Folosim valoarea mărită
+                value=LOCAL_SEARCH_DEFAULT_ITERATIONS, 
                 step=100, 
                 key='param_local_iter'
             )
@@ -688,7 +691,6 @@ with tab2:
                 
                 if use_recency_weighting:
                     round_weights = get_round_weights(st.session_state.rounds)
-                    # Convertim frozenset la string (reprezentarea listei) pentru a fi picklable
                     round_weights_data = {str(list(k)): v for k, v in round_weights.items()}
                 else:
                     round_weights_data = None
@@ -697,9 +699,8 @@ with tab2:
                 best_score = deepcopy(st.session_state.best_score_full)
                 best_variant_indices = []
                 st.session_state.intermediate_saves = [] 
-                st.session_state.score_evolution_data = [] # Resetare date grafic
+                st.session_state.score_evolution_data = []
                 
-                # Pre-calcularea seturilor
                 if not st.session_state.variants_sets_precomputed:
                     with st.spinner("Precomputare set-uri variante..."):
                         st.session_state.variants_sets_precomputed = precompute_variant_sets(st.session_state.variants)
@@ -710,20 +711,19 @@ with tab2:
                 # =========================================================================
                 # FAZA 1: Căutare Aleatorie PARALELIZATĂ (cu actualizare în TIMP REAL)
                 # =========================================================================
-                st.info(f"🚀 FAZA 1 (Multi-CPU cu {NUM_PROCESSES} procese): Target WIN **{target_win_score}**. Max: {MAX_RANDOM_ATTEMPTS:,}")
+                st.info(f"🚀 FAZA 1 (Multi-CPU cu {NUM_PROCESSES} procese): Max: {MAX_RANDOM_ATTEMPTS:,} încercări forțate.")
 
-                # Containere pentru actualizare în timp real
                 status_placeholder = st.empty()
                 progress_bar = st.progress(0)
-                chart_placeholder = st.empty() # Containerul pentru graficul Plotly
+                chart_placeholder = st.empty()
 
-                score_evolution_data = [] # Date pentru grafic
+                score_evolution_data = []
                 
                 with st.spinner(f"Optimizare paralelă pe {NUM_PROCESSES} CPU-uri..."):
                     
                     worker_args = [
                         (
-                            random.randint(0, 1000000 + i), # Seed unic
+                            random.randint(0, 1000000 + i),
                             count,
                             num_variants,
                             rounds_data_list, 
@@ -735,10 +735,9 @@ with tab2:
                         for i in range(MAX_RANDOM_ATTEMPTS)
                     ]
                     
-                    pool = None # Inițializare Pool
+                    pool = None
                     try:
                         pool = Pool(processes=NUM_PROCESSES)
-                        # Folosim imap_unordered pentru a obține rezultatele pe măsură ce sunt gata
                         results_iterator = pool.imap_unordered(evaluate_random_sample_worker, worker_args)
                         
                         for sample_indices, current_score in results_iterator:
@@ -750,21 +749,21 @@ with tab2:
                                 best_score = current_score.copy()
                                 best_variant_indices = sample_indices
                             
-                            # 1. ACTUALIZARE GRAFIC (în timp real)
+                            # 1. ACTUALIZARE GRAFIC
                             if attempts % 100 == 0 or attempts == 1 or is_better:
                                 score_evolution_data.append({
                                     'Încercare': attempts,
                                     'Fitness': best_score['fitness_score']
                                 })
                             
-                            if attempts % CHART_UPDATE_INTERVAL == 0 or attempts == MAX_RANDOM_ATTEMPTS or best_score['win_score'] >= target_win_score:
+                            if attempts % CHART_UPDATE_INTERVAL == 0 or attempts == MAX_RANDOM_ATTEMPTS:
                                 fig = plot_score_evolution(score_evolution_data)
                                 if fig:
                                     chart_placeholder.plotly_chart(fig, use_container_width=True)
                             
                             # 2. ACTUALIZARE UI STATUS & PROGRES
                             
-                            if attempts % 1000 == 0 or attempts == MAX_RANDOM_ATTEMPTS or best_score['win_score'] >= target_win_score:
+                            if attempts % 500 == 0 or attempts == MAX_RANDOM_ATTEMPTS:
                                 progress_percent = min(1.0, attempts / MAX_RANDOM_ATTEMPTS)
                                 progress_bar.progress(progress_percent)
                                 
@@ -777,7 +776,7 @@ with tab2:
                                 """
                                 status_placeholder.markdown(status_html, unsafe_allow_html=True)
                                 
-                            # 3. LOGICĂ DE SALVARE INTERMEDIARĂ (actualizează sidebar-ul)
+                            # 3. LOGICĂ DE SALVARE INTERMEDIARĂ
                             if attempts % INTERMEDIATE_SAVE_INTERVAL == 0:
                                 save_variants = [st.session_state.variants[i] for i in best_variant_indices]
                                 st.session_state.intermediate_saves.append({
@@ -785,11 +784,10 @@ with tab2:
                                     'score': best_score.copy(),
                                     'variants': deepcopy(save_variants)
                                 })
-                                # Forțează actualizarea sidebar-ului (deși nu se poate forța direct, acest mesaj ajută)
                                 st.sidebar.caption(f"Salvare la {attempts:,} încercări.")
                                 
-                            # Oprire anticipată dacă targetul este atins
-                            if best_score['win_score'] >= target_win_score:
+                            # MODIFICARE CHEIE 3: Forțăm oprirea după MAX_RANDOM_ATTEMPTS.
+                            if attempts >= MAX_RANDOM_ATTEMPTS:
                                 break
                     
                     finally:
@@ -801,7 +799,6 @@ with tab2:
                 st.session_state.score_evolution_data = score_evolution_data
                 status_placeholder.empty()
                 progress_bar.empty()
-                # Lăsăm graficul final afișat în chart_placeholder
                 
                 # =========================================================================
                 # FAZA 2: Căutare Evolutivă (Hole Coverage)
@@ -817,7 +814,8 @@ with tab2:
                     round_weights_local = get_round_weights(st.session_state.rounds) if use_recency_weighting else None
                     
                     for local_attempts in range(1, local_search_iterations + 1):
-                        # Identificare varianta cea mai slabă din eșantionul curent
+                        
+                        # 1. Identificare varianta cea mai slabă din eșantion
                         variant_scores = {}
                         for idx in current_best_indices:
                             score_single = calculate_wins_optimized(
@@ -829,19 +827,19 @@ with tab2:
                         weakest_idx = min(variant_scores, key=variant_scores.get)
                         weakest_position = current_best_indices.index(weakest_idx)
                         
-                        # Identificare rundele cele mai slab acoperite (găurile)
+                        # 2. Identificare rundele cele mai slab acoperite (găurile)
                         weakest_rounds = sorted(
                             current_best_score['score_per_round'].items(),
                             key=lambda item: item[1]['wins'] * 1000 + item[1]['3_3'] * 10 + item[1]['2_2']
                         )[:NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS]
                         weak_round_sets = [item[0] for item in weakest_rounds]
                         
-                        # Caută cel mai bun candidat din pool-ul mare
+                        # 3. Caută cel mai bun candidat din pool-ul mare (eșantionare 1000)
                         best_hole_score = -1
                         best_candidate_idx = None
                         
                         available_indices = [i for i in range(num_variants) if i not in current_best_indices]
-                        sample_size = min(500, len(available_indices))
+                        sample_size = min(1000, len(available_indices))
                         sampled_indices = random.sample(available_indices, sample_size)
                         
                         for candidate_idx in sampled_indices:
@@ -861,6 +859,7 @@ with tab2:
                         if best_candidate_idx is None:
                             best_candidate_idx = random.choice(available_indices)
                         
+                        # 4. Testare și acceptare
                         test_indices = current_best_indices.copy()
                         test_indices[weakest_position] = best_candidate_idx
                         
@@ -874,7 +873,7 @@ with tab2:
                             current_best_indices = test_indices.copy()
                         
                         # Actualizare status UI în timp real
-                        if local_attempts % 250 == 0 or local_attempts == local_search_iterations:
+                        if local_attempts % 500 == 0 or local_attempts == local_search_iterations:
                             score_detail = f"FITNESS: **{current_best_score['fitness_score']:.0f}** | WIN: {current_best_score['win_score']:,} | 3/3: {current_best_score['score_3_3']:,} | StdDev: {current_best_score['std_dev_wins']:.2f}"
                             local_status_html = f"""
                             <div class="status-box local-search-status">
@@ -910,7 +909,6 @@ with tab2:
         if st.session_state.optimization_attempts > 0 or st.session_state.local_search_attempts > 0:
             st.info(f"Ultima rulare: **{st.session_state.optimization_attempts:,}** încercări aleatorii (multi-CPU) și **{st.session_state.local_search_attempts:,}** evolutive.")
             
-            # Reafișează graficul final, în caz de rerun
             if st.session_state.score_evolution_data:
                 st.markdown("---")
                 st.markdown("### Evoluția Scorului (Ultima Rulare)")
