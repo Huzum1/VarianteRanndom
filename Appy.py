@@ -12,7 +12,7 @@ from io import BytesIO
 # CONSTANTE ȘI CONFIGURARE PAGINĂ
 # =========================================================================
 
-MAX_RANDOM_ATTEMPTS = 100000
+MAX_RANDOM_ATTEMPTS = 120000
 INTERMEDIATE_SAVE_INTERVAL = 5000 
 PENALTY_FACTOR_K = 0.5  
 NUM_WEAK_ROUNDS_FOR_HOLE_ANALYSIS = 10 
@@ -261,11 +261,12 @@ def analyze_round_performance(generated_variants, rounds_set):
         results_lines.append(f"Runda {i+1} - WINs: {wins_in_round}, 3/3: {score_3_3_in_round}, 2/2: {score_2_2_in_round}")
     return '\n'.join(results_lines)
 
-# --- FUNCTIA DE EXPORT TXT (PĂSTRATĂ ȘI UTILIZATĂ) ---
+# --- FUNCTIA DE EXPORT TXT (FĂRĂ ANTET) ---
 def variants_to_text(variants):
+    """Convertește lista de variante în format TXT (ID, numere), fără antet."""
     return '\n'.join([f"{v['id']},{v['combination']}" for v in variants])
 
-# --- FUNCTIA DE EXPORT CSV (CURĂȚATĂ DE ARGUMENTELE PROBLEMATICE) ---
+# --- FUNCTIA DE EXPORT CSV ---
 def variants_to_csv(variants):
     df = pd.DataFrame(variants)
     output = BytesIO()
@@ -334,7 +335,6 @@ st.markdown("# 👑 Generator Variante Loterie (Premium)")
 st.markdown("### Optimizare pe Uniformitate, Recență și Hole Coverage")
 
 # Sidebar
-# ... (Logică Sidebar) ...
 with st.sidebar:
     st.markdown("## 📊 Statistici Curente")
     st.metric("Variante Curățate", len(st.session_state.variants))
@@ -350,22 +350,30 @@ with st.sidebar:
     st.caption(f"WIN: {full_score['win_score']:,} | 3/3: {full_score['score_3_3']:,} | Std Dev: {full_score['std_dev_wins']:.2f}")
 
     st.markdown("---")
-    st.markdown("#### Salvari Intermediare")
+    st.markdown("#### 💾 Salvari Intermediare (5000 încercări)")
     if st.session_state.intermediate_saves:
-        st.success(f"💾 {len(st.session_state.intermediate_saves)} eșantioane salvate")
+        st.success(f"🎉 {len(st.session_state.intermediate_saves)} eșantioane salvate")
         
-        all_saves_text = ""
+        # Logica de descărcare separată
         for i, save in enumerate(st.session_state.intermediate_saves):
-            all_saves_text += f"=== Salvare Intermediară #{i+1} | WIN: {save['score']['win_score']} | Fitness: {save['score']['fitness_score']:.0f} | Încercare: {save['attempt']} ===\n"
-            all_saves_text += variants_to_text(save['variants']) + "\n\n"
+            save_name = f"#{i+1} | WIN: {save['score']['win_score']} | Fitness: {save['score']['fitness_score']:.0f} | Încercare: {save['attempt']:,}"
             
-        st.download_button(
-            "💾 Descarcă Toate Salvările (TXT)",
-            data=all_saves_text,
-            file_name="salvari_intermediare_optimizare.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+            # Utilizează o formă compactă pentru fiecare salvare
+            col_idx, col_dl = st.columns([2, 1])
+            
+            with col_idx:
+                 st.caption(save_name)
+                 
+            with col_dl:
+                st.download_button(
+                    "💾 TXT",
+                    data=variants_to_text(save['variants']), # Folosește funcția care nu adaugă antet
+                    file_name=f"salvare_intermediara_{i+1}_A{save['attempt']}.txt",
+                    mime="text/plain",
+                    key=f"dl_save_{i}",
+                    use_container_width=True
+                )
+
     else:
         st.info("Nicio salvare intermediară.")
 
@@ -535,11 +543,21 @@ with tab2:
                         
                         # Salvare Intermediară
                         if attempts % INTERMEDIATE_SAVE_INTERVAL == 0 and attempts > 0:
-                            st.session_state.intermediate_saves.append({
-                                'attempt': attempts,
-                                'score': best_score.copy(),
-                                'variants': deepcopy(best_variants)
-                            })
+                            if compare_scores(current_score, best_score, target_win_score) or not st.session_state.intermediate_saves:
+                                # Dacă este mai bun decât cel mai bun curent sau prima salvare
+                                st.session_state.intermediate_saves.append({
+                                    'attempt': attempts,
+                                    'score': current_score.copy(), # Salvează scorul actual, care este cel mai bun până acum.
+                                    'variants': deepcopy(current_variants)
+                                })
+                            else:
+                                # Dacă nu e mai bun, salvează cel mai bun găsit până la această etapă
+                                st.session_state.intermediate_saves.append({
+                                    'attempt': attempts,
+                                    'score': best_score.copy(),
+                                    'variants': deepcopy(best_variants)
+                                })
+                                
                             status_placeholder.markdown(f'<div class="status-box"><span class="intermediate-save">💾 Salvare intermediară la {attempts:,} încercări.</span></div>', unsafe_allow_html=True)
                             time.sleep(0.01)
                         
