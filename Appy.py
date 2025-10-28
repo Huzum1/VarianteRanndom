@@ -152,4 +152,104 @@ def generate_statistical_coverage_variants(all_variants, historical_rounds, freq
         for num in var['numbers']:
             number_coverage[num] += 1
         for pair in combinations(var['numbers'], 2):
-            pair_coverage[pair
+            pair_coverage[pair] += 1
+
+    return number_vars, number_coverage, pair_coverage
+
+
+# ========= FUNCȚIA: export =========
+def export_to_txt(variants):
+    output = []
+    for variant in variants:
+        var_id = variant['id']
+        numbers = ' '.join(map(str, variant['numbers']))
+        output.append(f"{var_id}, {numbers}")
+    return '\n'.join(output)
+
+
+# ========= INTERFAȚĂ GRAFICĂ =========
+
+col1, col2 = st.columns(2)
+with col1:
+    st.header("📥 1. Import Variante")
+    variants_file = st.file_uploader("Încarcă fișier .txt cu variante", type=['txt'], key='variants')
+    if variants_file:
+        content = variants_file.read().decode('utf-8')
+        all_variants = parse_txt_file(content)
+        st.success(f"✅ {len(all_variants)} variante încărcate")
+        with st.expander("👁️ Preview"):
+            for i, (vid, vnums) in enumerate(all_variants[:5]):
+                st.text(f"{vid}: {vnums}")
+
+with col2:
+    st.header("📥 2. Import Runde Istorice")
+    rounds_file = st.file_uploader("Încarcă fișier .txt cu runde istorice", type=['txt'], key='rounds')
+    if rounds_file:
+        content = rounds_file.read().decode('utf-8')
+        historical_rounds = parse_txt_file(content)
+        st.success(f"✅ {len(historical_rounds)} runde încărcate")
+        with st.expander("👁️ Preview"):
+            for i, (rid, rnums) in enumerate(historical_rounds[:5]):
+                st.text(f"{rid}: {rnums}")
+
+st.markdown("---")
+
+# ========= CONFIGURARE =========
+
+st.header("⚙️ 3. Configurare Generare PRO")
+col3, col4, col5 = st.columns(3)
+with col3:
+    coverage_variants = st.number_input("Variante Pas 1 (4/4 garantat)", 100, 1000, 800, 50)
+with col4:
+    number_variants = st.number_input("Variante Pas 2 (statistici)", 100, 500, 365, 50)
+with col5:
+    max_number = st.number_input("Număr maxim (plaja)", 40, 100, 66, 1)
+with st.expander("🔧 Setări Avansate"):
+    max_attempts = st.number_input("Max încercări căutare 4/4", 10000, 100000, 30000, 5000)
+    target_per_round = st.selectbox("Target variante per rundă", [1, 2, 3], 1)
+
+total_variants = coverage_variants + number_variants
+st.info(f"📊 Total variante generate: **{total_variants}**")
+
+# ========= BUTON PRINCIPAL =========
+if st.button("🚀 GENEREAZĂ CU GARANȚIE 4/4", type="primary", use_container_width=True):
+    if 'all_variants' not in locals() or 'historical_rounds' not in locals():
+        st.error("❌ Te rog încarcă fișierele!")
+    else:
+        start_time = time.time()
+        st.info("🔁 Încep procesarea...")
+
+        freq_counter, hot_numbers, cold_numbers, normal_numbers = calculate_number_statistics(historical_rounds)
+        pair_freq, triplet_freq = calculate_pair_frequencies(historical_rounds)
+
+        covering_vars, round_coverage = find_perfect_matches(
+            all_variants, historical_rounds, target_per_round, max_attempts
+        )
+        number_vars, number_coverage, pair_coverage = generate_statistical_coverage_variants(
+            all_variants, historical_rounds, freq_counter,
+            hot_numbers, cold_numbers, normal_numbers,
+            pair_freq, triplet_freq,
+            number_variants, max_number
+        )
+
+        final_variants = covering_vars + number_vars
+        elapsed = time.time() - start_time
+        st.session_state['final_variants'] = final_variants
+        st.success(f"✅ Generare completă în {elapsed:.2f} secunde — {len(final_variants)} variante create!")
+
+# ========= EXPORT =========
+if 'final_variants' in st.session_state:
+    final_variants = st.session_state['final_variants']
+    export_all = export_to_txt(final_variants)
+    perfect_only = [v for v in final_variants if v.get('match_type') == '4/4']
+    export_perfect = export_to_txt(perfect_only)
+
+    st.markdown("---")
+    st.header("💾 5. Export Variante Finale")
+    colA, colB = st.columns(2)
+    with colA:
+        st.download_button("📥 Descarcă TOATE variantele", export_all, "variante_totale.txt")
+    with colB:
+        st.download_button("🎯 Descarcă doar variantele 4/4", export_perfect, "variante_4din4.txt")
+
+st.caption("© 2025 Generator Inteligent Loterie PRO – versiune completă și funcțională ✅")
