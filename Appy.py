@@ -1,448 +1,716 @@
-# Appy.py — Generator Inteligent Loterie PRO (complet)
-import streamlit as st
+"""
+Polymarket BTC 5m Analyzer — Single-File Streamlit Edition.
+
+Totul într-un singur fișier: fetchere, analiză, predictor, dashboard live.
+Rulare:  streamlit run app.py
+"""
+
+# ═══════════════════════════════════════════════════════════
+# 1. IMPORTS
+# ═══════════════════════════════════════════════════════════
+import json
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import pandas as pd
-import random
-import time
-from itertools import combinations
-from collections import Counter, defaultdict
-from io import StringIO
+import requests
+from pydantic import BaseModel, Field, field_validator
 
-# ---------------- Page config ----------------
-st.set_page_config(page_title="Generator Inteligent Loterie PRO", layout="wide")
-st.title("🎰 Generator Inteligent de Numere Loterie PRO")
-st.markdown("*Garanție: Minim 2 variante 4/4 per rundă + Acoperire statistică completă*")
-st.markdown("---")
+# Streamlit se importă doar în blocul principal ca să evităm warning-uri la import
 
-# ---------------- Utility parsers ----------------
-def parse_txt_file_content(text):
-    """
-    Parse text content where lines are: ID, n1 n2 n3 n4 (or n1,n2,...)
-    Returns list of (id, [nums])
-    """
-    variants = []
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Accept both "ID, 1 2 3 4" and "ID,1,2,3,4"
-        parts = [p.strip() for p in line.split(',') if p.strip() != ""]
-        if len(parts) >= 2:
-            try:
-                vid = parts[0]
-                rest = " ".join(parts[1:]).replace(',', ' ')
-                nums = [int(x) for x in rest.split() if x.strip().isdigit()]
-                if nums:
-                    variants.append((str(vid), nums))
-            except Exception:
-                continue
-    return variants
+# ═══════════════════════════════════════════════════════════
+# 2. CONFIG
+# ═══════════════════════════════════════════════════════════
+class CFG:
+    WINDOW_SEC: int = 300
+    ASSET: str = "BTC"
+    GAMMA_URL: str = "https://gamma-api.polymarket.com"
+    CLOB_URL: str = "https://clob.polymarket.com"
+    BINANCE_REST: str = "https://api.binance.com"
+    BINANCE_FAPI: str = "https://fapi.binance.com"
+    SYMBOL: str = "BTCUSDT"
+    EDGE_THRESHOLD: float = 0.05
+    VOL: float = 0.005
+    N_PATHS: int = 2000
+    POLL_INTERVAL: float = 2.5
+    HIGH_CONF: float = 0.75
+    MED_CONF: float = 0.55
 
-def load_variants_from_file(uploaded):
-    """
-    Accept CSV (first col ID, rest numbers), Excel or TXT.
-    Returns list of (id, [nums])
-    """
-    if uploaded is None:
-        return []
-    name = uploaded.name.lower()
+
+# ═══════════════════════════════════════════════════════════
+# 3. PYDANTIC MODELS (validare strictă, zero bug-uri de tip)
+# ═══════════════════════════════════════════════════════════
+class MarketWindow(BaseModel):
+    window_start_ts: int
+    window_end_ts: int
+    slug: str
+    asset: str = CFG.ASSET
+    interval_minutes: int = 5
+
+    @field_validator("window_start_ts")
+    @classmethod
+    def _div300(cls, v: int) -> int:
+        if v % CFG.WINDOW_SEC != 0:
+            raise ValueError("window_start_ts must be divisible by 300")
+        return v
+
+    @field_validator("window_end_ts")
+    @classmethod
+    def _end(cls, v: int, info: Any) -> int:
+        start = info.data.get("window_start_ts")
+        if start is not None and v != start + CFG.WINDOW_SEC:
+            raise ValueError("window_end_ts must be window_start_ts + 300")
+        return v
+
+    @property
+    def seconds_remaining(self) -> int:
+        rem = self.window_end_ts - int(time.time())
+        return max(0, rem)
+
+    @property
+    def progress(self) -> float:
+        elapsed = CFG.WINDOW_SEC - self.seconds_remaining
+        return min(1.0, max(0.0, elapsed / CFG.WINDOW_SEC))
+
+
+class Signal(BaseModel):
+    side: str = Field(..., pattern="^(UP|DOWN)$")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence_level: str = "UNCERTAIN"
+    edge_pct: float = 0.0
+    estimated_prob: float = Field(..., ge=0.0, le=1.0)
+    indicators: Dict[str, Any] = Field(default_factory=dict)
+    seconds_to_close: int = 0
+
+
+class PolymarketMarket(BaseModel):
+    slug: str
+    market_id: str = ""
+    condition_id: str = ""
+    question: str = ""
+    up_token: str = ""
+    down_token: str = ""
+    up_buy: float = 0.5
+    up_sell: float = 0.5
+    up_mid: float = 0.5
+    down_buy: float = 0.5
+    down_sell: float = 0.5
+    down_mid: float = 0.5
+    volume: float = 0.0
+    liquidity: float = 0.0
+    accepting: bool = True
+    closed: bool = False
+
+    @property
+    def implied_up(self) -> float:
+        return self.up_mid
+
+    @property
+    def implied_down(self) -> float:
+        return self.down_mid
+
+    @property
+    def spread(self) -> float:
+        return abs(self.up_mid - self.down_mid)
+
+
+class AnalysisResult(BaseModel):
+    window: MarketWindow
+    market: Optional[PolymarketMarket] = None
+    btc_price: Optional[float] = None
+    open_price: Optional[float] = None
+    delta_pct: float = 0.0
+    funding_rate: Optional[float] = None
+    signal: Optional[Signal] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. HELPERS
+# ═══════════════════════════════════════════════════════════
+def current_window() -> MarketWindow:
+    now = int(time.time())
+    ws = now - (now % CFG.WINDOW_SEC)
+    slug = f"{CFG.ASSET.lower()}-updown-5m-{ws}"
+    return MarketWindow(
+        window_start_ts=ws,
+        window_end_ts=ws + CFG.WINDOW_SEC,
+        slug=slug,
+    )
+
+
+def safe_json(resp: requests.Response) -> Optional[Any]:
     try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(uploaded, header=None)
-            rows = []
-            for _, r in df.iterrows():
-                vid = r.iloc[0]
-                nums = [int(x) for x in r.iloc[1:].dropna().astype(int).tolist()]
-                rows.append((str(vid), nums))
-            return rows
-        elif name.endswith(".xlsx") or name.endswith(".xls"):
-            df = pd.read_excel(uploaded, header=None)
-            rows = []
-            for _, r in df.iterrows():
-                vid = r.iloc[0]
-                nums = [int(x) for x in r.iloc[1:].dropna().astype(int).tolist()]
-                rows.append((str(vid), nums))
-            return rows
-        elif name.endswith(".txt"):
-            txt = uploaded.read().decode('utf-8')
-            return parse_txt_file_content(txt)
+        return resp.json()
+    except Exception:
+        return None
+
+
+# Simple manual cache for Polymarket market (ttl 60s) to avoid rate limits
+__market_cache: Dict[str, Tuple[float, Any]] = {}
+
+
+def _cache_get(key: str, ttl: int = 60) -> Optional[Any]:
+    now = time.time()
+    if key in __market_cache:
+        ts, val = __market_cache[key]
+        if now - ts < ttl:
+            return val
+    return None
+
+
+def _cache_set(key: str, val: Any) -> None:
+    __market_cache[key] = (time.time(), val)
+
+
+# ═══════════════════════════════════════════════════════════
+# 5. DATA FETCHERS (sync, robust, cu fallback)
+# ═══════════════════════════════════════════════════════════
+def fetch_polymarket_market(slug: str) -> Optional[PolymarketMarket]:
+    """Gamma API — descoperă piața determinist după slug."""
+    cached = _cache_get(slug)
+    if cached is not None:
+        return cached
+    try:
+        r = requests.get(
+            f"{CFG.GAMMA_URL}/events",
+            params={"slug": slug},
+            timeout=10,
+            headers={"Accept": "application/json", "User-Agent": "PM-BTC-Analyzer/1.0"},
+        )
+        r.raise_for_status()
+        data = safe_json(r)
+        if not data:
+            return None
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not data or not isinstance(data, dict):
+            return None
+        markets = data.get("markets", [])
+        if not markets:
+            return None
+        m = markets[0]
+        token_ids = m.get("clobTokenIds", [])
+        outcomes = m.get("outcomes", "[]")
+        try:
+            outs = json.loads(outcomes) if isinstance(outcomes, str) else outcomes
+        except Exception:
+            outs = ["Yes", "No"]
+        if len(token_ids) < 2 or len(outs) < 2:
+            return None
+
+        up_id, down_id = str(token_ids[0]), str(token_ids[1])
+
+        # CLOB prices
+        up_b, up_s, up_m = fetch_clob_prices(up_id)
+        dn_b, dn_s, dn_m = fetch_clob_prices(down_id)
+
+        market = PolymarketMarket(
+            slug=slug,
+            market_id=str(m.get("id", "")),
+            condition_id=m.get("conditionId", ""),
+            question=m.get("question", ""),
+            up_token=up_id,
+            down_token=down_id,
+            up_buy=up_b,
+            up_sell=up_s,
+            up_mid=up_m,
+            down_buy=dn_b,
+            down_sell=dn_s,
+            down_mid=dn_m,
+            volume=float(m.get("volume", 0) or 0),
+            liquidity=float(m.get("liquidity", 0) or 0),
+            accepting=bool(m.get("acceptingOrders", True)),
+            closed=bool(m.get("closed", False)),
+        )
+        _cache_set(slug, market)
+        return market
+    except Exception:
+        return None
+
+
+def fetch_clob_prices(token_id: str) -> Tuple[float, float, float]:
+    """CLOB API — best buy / sell / midpoint."""
+    try:
+        rb = requests.get(
+            f"{CFG.CLOB_URL}/price",
+            params={"token_id": token_id, "side": "BUY"},
+            timeout=8,
+        )
+        rs = requests.get(
+            f"{CFG.CLOB_URL}/price",
+            params={"token_id": token_id, "side": "SELL"},
+            timeout=8,
+        )
+        b = float(safe_json(rb).get("price", 0.5) or 0.5) if rb.status_code == 200 else 0.5
+        s = float(safe_json(rs).get("price", 0.5) or 0.5) if rs.status_code == 200 else 0.5
+        return round(b, 4), round(s, 4), round((b + s) / 2.0, 4)
+    except Exception:
+        return 0.5, 0.5, 0.5
+
+
+def fetch_binance_price() -> Optional[float]:
+    try:
+        r = requests.get(
+            f"{CFG.BINANCE_REST}/api/v3/ticker/price",
+            params={"symbol": CFG.SYMBOL},
+            timeout=8,
+        )
+        r.raise_for_status()
+        return float(r.json()["price"])
+    except Exception:
+        return None
+
+
+def fetch_binance_klines(limit: int = 20) -> pd.DataFrame:
+    try:
+        r = requests.get(
+            f"{CFG.BINANCE_REST}/api/v3/klines",
+            params={"symbol": CFG.SYMBOL, "interval": "1m", "limit": limit},
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.json()
+        rows = []
+        for item in raw:
+            rows.append(
+                {
+                    "open_time": pd.to_datetime(int(item[0]), unit="ms", utc=True),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                    "close_time": pd.to_datetime(int(item[6]), unit="ms", utc=True),
+                }
+            )
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+
+def fetch_binance_funding() -> Optional[float]:
+    try:
+        r = requests.get(
+            f"{CFG.BINANCE_FAPI}/fapi/v1/premiumIndex",
+            params={"symbol": CFG.SYMBOL},
+            timeout=8,
+        )
+        r.raise_for_status()
+        return float(r.json().get("lastFundingRate", 0) or 0)
+    except Exception:
+        return None
+
+
+def fetch_binance_depth() -> Tuple[Optional[float], Optional[float]]:
+    try:
+        r = requests.get(
+            f"{CFG.BINANCE_REST}/api/v3/depth",
+            params={"symbol": CFG.SYMBOL, "limit": 10},
+            timeout=8,
+        )
+        r.raise_for_status()
+        data = r.json()
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        bb = float(bids[0][0]) if bids else None
+        ba = float(asks[0][0]) if asks else None
+        return bb, ba
+    except Exception:
+        return None, None
+
+
+def get_window_open_price(window_start_ts: int, df: pd.DataFrame) -> Optional[float]:
+    """Găsește open price din candle-ul 1m care conține window_start_ts."""
+    if df.empty:
+        return None
+    target = pd.to_datetime(window_start_ts, unit="s", utc=True)
+    for _, row in df.iterrows():
+        if row["open_time"] <= target <= row["close_time"]:
+            return float(row["open"])
+    return float(df.iloc[-1]["close"]) if not df.empty else None
+
+
+# ═══════════════════════════════════════════════════════════
+# 6. ANALYSIS (pure functions, ușor de testat)
+# ═══════════════════════════════════════════════════════════
+def calc_delta(open_price: float, current_price: float) -> float:
+    if open_price <= 0:
+        return 0.0
+    return (current_price - open_price) / open_price
+
+
+def delta_weight(delta_pct: float) -> float:
+    ad = abs(delta_pct)
+    if ad > 0.0010:
+        return 7.0
+    if ad > 0.0005:
+        return 5.0
+    if ad > 0.0002:
+        return 3.0
+    if ad > 0.00005:
+        return 1.0
+    return 0.5
+
+
+def delta_to_signal(delta_pct: float, seconds_left: int) -> Signal:
+    raw_prob = 0.50 + delta_pct * 500  # probabilitatea de UP (direct proportional cu delta)
+    # Aplicăm clamping inițial
+    base = max(0.0, min(1.0, raw_prob))
+    # Penalizare / boost în funcție de timpul rămas
+    if seconds_left > 60:
+        base = 0.5 + (base - 0.5) * 0.80  # retragere spre 0.5
+    elif seconds_left > 30:
+        base = 0.5 + (base - 0.5) * 0.90
+    elif seconds_left <= 10:
+        base = 0.5 + (base - 0.5) * 1.05  # boost
+    base = max(0.0, min(1.0, base))
+    side = "UP" if delta_pct >= 0 else "DOWN"
+    conf = base if side == "UP" else (1.0 - base)
+    level = (
+        "HIGH" if conf >= CFG.HIGH_CONF else
+        "MEDIUM" if conf >= CFG.MED_CONF else
+        "LOW" if conf >= 0.45 else "UNCERTAIN"
+    )
+    return Signal(
+        side=side,
+        confidence=round(conf, 4),
+        confidence_level=level,
+        estimated_prob=round(base, 4) if side == "UP" else round(1.0 - base, 4),
+        indicators={"window_delta_pct": round(delta_pct * 100, 4), "delta_weight": delta_weight(delta_pct)},
+        seconds_to_close=seconds_left,
+    )
+
+
+def rsi(closes: List[float], period: int = 14) -> Optional[float]:
+    if len(closes) < period + 1:
+        return None
+    arr = np.array(closes[-period - 1:], dtype=float)
+    deltas = np.diff(arr)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    avg_gain = float(np.mean(gains))
+    avg_loss = float(np.mean(losses)) or 1e-10
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 4)
+
+
+def ema(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    arr = np.array(values, dtype=float)
+    alpha = 2.0 / (period + 1)
+    ema_val = arr[0]
+    for v in arr[1:]:
+        ema_val = alpha * v + (1 - alpha) * ema_val
+    return round(float(ema_val), 4)
+
+
+def sma(values: List[float], period: int) -> Optional[float]:
+    if len(values) < period:
+        return None
+    return round(float(np.mean(values[-period:])), 4)
+
+
+def vwap(df: pd.DataFrame, period: int = 10) -> Optional[float]:
+    if len(df) < period:
+        return None
+    recent = df.tail(period).copy()
+    recent["typical"] = (recent["high"] + recent["low"] + recent["close"]) / 3.0
+    return round(float((recent["typical"] * recent["volume"]).sum() / recent["volume"].sum()), 4)
+
+
+def momentum(closes: List[float], period: int = 5) -> Optional[float]:
+    if len(closes) < period + 1:
+        return None
+    return round((closes[-1] - closes[-period - 1]) / closes[-period - 1] * 100, 4)
+
+
+def predict_signal(
+    window: MarketWindow,
+    df: pd.DataFrame,
+    open_price: float,
+    current_price: float,
+    funding_rate: Optional[float],
+) -> Signal:
+    delta_pct = calc_delta(open_price, current_price)
+    delta_sig = delta_to_signal(delta_pct, window.seconds_remaining)
+
+    closes = df["close"].tolist() if not df.empty and "close" in df.columns else []
+    tech_score = 0.0
+    tech_ind = {}
+    if len(closes) >= 5:
+        tech_ind["rsi_14"] = rsi(closes, 14)
+        tech_ind["rsi_7"] = rsi(closes, 7)
+        tech_ind["ema_9"] = ema(closes, 9)
+        tech_ind["sma_5"] = sma(closes, 5)
+        tech_ind["vwap_10"] = vwap(df, 10)
+        tech_ind["momentum_5"] = momentum(closes, 5)
+
+        scores = []
+        if tech_ind["rsi_14"] is not None:
+            rsi_v = tech_ind["rsi_14"]
+            scores.append((rsi_v - 50) / 50.0)
+        if tech_ind["momentum_5"] is not None:
+            mom = tech_ind["momentum_5"]
+            scores.append(np.sign(mom) * min(abs(mom) / 0.5, 1.0))
+        if tech_ind["vwap_10"] is not None and current_price > 0:
+            scores.append(0.5 if current_price > tech_ind["vwap_10"] else -0.5)
+        if scores:
+            tech_score = np.clip(np.mean(scores), -1.0, 1.0)
+
+    seconds_left = window.seconds_remaining
+    mc_prob = 0.5
+    if seconds_left > 0 and current_price > 0 and open_price > 0:
+        dt = seconds_left / 3600.0
+        shocks = np.random.standard_normal(CFG.N_PATHS)
+        paths = current_price * np.exp((-0.5 * CFG.VOL ** 2) * dt + CFG.VOL * np.sqrt(dt) * shocks)
+        mc_prob = float(np.mean(paths >= open_price))
+
+    funding_bias = 0.0
+    if funding_rate is not None and abs(funding_rate) > 0.001:
+        funding_bias = np.sign(funding_rate) * 0.02
+
+    delta_prob = delta_sig.estimated_prob if delta_sig.side == "UP" else (1.0 - delta_sig.estimated_prob)
+    combined = 0.55 * delta_prob + 0.30 * (0.5 + tech_score * 0.5) + 0.15 * mc_prob + funding_bias
+    combined = max(0.01, min(0.99, combined))
+
+    side = "UP" if combined >= 0.5 else "DOWN"
+    confidence = combined if side == "UP" else (1.0 - combined)
+    level = (
+        "HIGH" if confidence >= CFG.HIGH_CONF else
+        "MEDIUM" if confidence >= CFG.MED_CONF else
+        "LOW" if confidence >= 0.45 else "UNCERTAIN"
+    )
+
+    return Signal(
+        side=side,
+        confidence=round(confidence, 4),
+        confidence_level=level,
+        estimated_prob=round(combined, 4),
+        indicators={
+            **tech_ind,
+            "window_delta_pct": round(delta_pct * 100, 4),
+            "mc_prob": round(mc_prob, 4),
+            "funding_bias": round(funding_bias, 4),
+        },
+        seconds_to_close=seconds_left,
+    )
+
+
+def detect_edge(market: Optional[PolymarketMarket], signal: Optional[Signal]) -> Optional[Dict[str, Any]]:
+    if not market or not signal:
+        return None
+    estimated = signal.estimated_prob
+    implied = market.implied_up
+    edge = estimated - implied
+    signal.edge_pct = round(edge, 4)
+
+    if edge >= CFG.EDGE_THRESHOLD:
+        return {"type": "EDGE", "priority": 1, "title": f"EDGE {signal.side} (+{edge:.2%})", "body": f"Est:{estimated:.2%} vs Market:{implied:.2%}"}
+    if signal.confidence >= CFG.HIGH_CONF and edge > 0.02:
+        return {"type": "HIGH_CONF", "priority": 2, "title": f"High Confidence {signal.side}", "body": f"Conf:{signal.confidence:.2%} Est:{estimated:.2%}"}
+    if market.implied_up + market.implied_down < 0.98:
+        return {"type": "ARBITRAGE", "priority": 1, "title": "Arbitrage hint", "body": f"Sum={market.implied_up+market.implied_down:.4f}"}
+    return None
+
+
+# ═══════════════════════════════════════════════════════════
+# 7. STREAMLIT UI & MAIN LOOP (protejat)
+# ═══════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    import streamlit as st
+
+    st.set_page_config(
+        page_title="Polymarket BTC 5m Analyzer",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+
+    # ── Session State Init ────────────────────────────────────
+    if "history" not in st.session_state:
+        st.session_state.history = []
+        st.session_state.alerts = []
+        st.session_state.last_window_ts = 0
+        st.session_state.window_open_price = None
+        st.session_state._last_fetch_err = ""
+
+    st.title("🔮 Polymarket BTC 5m Analyzer — Live Streamlit Edition")
+    st.caption("Single-file. Zero dependencies externe. Dashboard + predictor + alerte.")
+
+    # ── Layout placeholders ───────────────────────────────────
+    window = current_window()
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        btc_metric = st.empty()
+    with m2:
+        up_metric = st.empty()
+    with m3:
+        down_metric = st.empty()
+    with m4:
+        sig_metric = st.empty()
+
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
+        chart_area = st.empty()
+        df_details = st.empty()
+    with col_right:
+        alert_area = st.empty()
+        st.subheader("Technical Indicators")
+        tech_area = st.empty()
+
+    with st.expander("Debug / Raw Data"):
+        debug_raw = st.empty()
+
+    # ── Main Cycle ───────────────────────────────────────────
+    # New window detection
+    if window.window_start_ts != st.session_state.last_window_ts:
+        st.session_state.last_window_ts = window.window_start_ts
+        klines_df = fetch_binance_klines(limit=5)
+        st.session_state.window_open_price = get_window_open_price(window.window_start_ts, klines_df)
+
+    # Fetch data
+    market = fetch_polymarket_market(window.slug)
+    btc_price = fetch_binance_price()
+    klines_df = fetch_binance_klines(limit=20)
+    funding = fetch_binance_funding()
+    bb, ba = fetch_binance_depth()
+
+    # Analysis
+    open_price = st.session_state.window_open_price
+    signal = None
+    result = None
+
+    if open_price and btc_price:
+        delta_pct = calc_delta(open_price, btc_price)
+        signal = predict_signal(window, klines_df, open_price, btc_price, funding)
+        result = AnalysisResult(
+            window=window,
+            market=market,
+            btc_price=btc_price,
+            open_price=open_price,
+            delta_pct=delta_pct,
+            funding_rate=funding,
+            signal=signal,
+        )
+
+        alert = detect_edge(market, signal)
+        if alert:
+            alert["time"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            st.session_state.alerts.insert(0, alert)
+            if len(st.session_state.alerts) > 30:
+                st.session_state.alerts = st.session_state.alerts[:30]
+
+        st.session_state.history.append(
+            {
+                "time": datetime.now(timezone.utc),
+                "up_odds": market.implied_up if market else 0.5,
+                "down_odds": market.implied_down if market else 0.5,
+                "btc_price": btc_price,
+                "delta_pct": delta_pct,
+                "confidence": signal.confidence,
+                "edge": signal.edge_pct,
+            }
+        )
+        if len(st.session_state.history) > 120:
+            st.session_state.history = st.session_state.history[-120:]
+
+    # ── Render ───────────────────────────────────────────────
+    progress_bar.progress(window.progress)
+    progress_text.markdown(
+        f"**Window:** `{window.slug}` — ⏱️ **{window.seconds_remaining}s** remaining"
+    )
+
+    with btc_metric:
+        st.metric(
+            label="BTC Price",
+            value=f"${btc_price:,.2f}" if btc_price else "N/A",
+            delta=f"{calc_delta(open_price, btc_price)*100:.4f}%" if open_price and btc_price else None,
+        )
+
+    with up_metric:
+        st.metric(
+            label="Polymarket UP",
+            value=f"{market.implied_up:.2%}" if market else "N/A",
+            delta=f"buy {market.up_buy:.2f} / sell {market.up_sell:.2f}" if market else None,
+        )
+
+    with down_metric:
+        st.metric(
+            label="Polymarket DOWN",
+            value=f"{market.implied_down:.2%}" if market else "N/A",
+            delta=f"buy {market.down_buy:.2f} / sell {market.down_sell:.2f}" if market else None,
+        )
+
+    with sig_metric:
+        if signal:
+            color = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🟠", "UNCERTAIN": "⚪"}.get(signal.confidence_level, "⚪")
+            st.metric(
+                label=f"Signal {color}",
+                value=f"{signal.side} ({signal.confidence_level})",
+                delta=f"conf {signal.confidence:.2%} | edge {signal.edge_pct:.2%}",
+            )
         else:
-            st.warning("Format fișier necunoscut — folosește CSV / XLSX / TXT.")
-            return []
-    except Exception as e:
-        st.error(f"Eroare la citirea fișierului: {e}")
-        return []
+            st.metric(label="Signal", value="N/A")
 
-def load_rounds_from_file(uploaded):
-    # same structure as variants: first column round id, remaining numbers
-    return load_variants_from_file(uploaded)
-
-# ---------------- Core helpers ----------------
-def count_matches(variant, round_numbers):
-    return len(set(variant) & set(round_numbers))
-
-# ---------- Deterministic, efficient find_perfect_matches ----------
-def find_perfect_matches(all_variants, historical_rounds, target_per_round=2,
-                         desired_total=None, progress_bar=None, status_text=None):
-    """
-    - Index variants by tuple(sorted(nums)) -> list of (id, nums)
-    - For each round, pick up to target_per_round unique variant ids
-    - After that, if desired_total provided and not reached, pad with unused variants
-    Returns: selected_variants_list, round_coverage (defaultdict)
-    Each variant dict: {'id', 'numbers', 'round_id' (or None), 'match_type'}
-    """
-    # Build index
-    combo_to_variants = defaultdict(list)
-    for var_id, nums in all_variants:
-        key = tuple(sorted(nums))
-        combo_to_variants[key].append((var_id, nums))
-
-    selected_variants = []
-    used_ids = set()
-    round_coverage = defaultdict(int)
-    total_rounds = len(historical_rounds)
-
-    start_time = time.time()
-    for idx, (round_id, round_nums) in enumerate(historical_rounds):
-        key = tuple(sorted(round_nums))
-        candidates = combo_to_variants.get(key, [])
-        # pick candidates in deterministic order (as in list). Avoid reusing id
-        for var_id, nums in candidates:
-            if round_coverage[round_id] >= target_per_round:
-                break
-            if var_id in used_ids:
-                continue
-            selected_variants.append({
-                'id': var_id,
-                'numbers': nums,
-                'round_id': round_id,
-                'match_type': '4/4'
-            })
-            used_ids.add(var_id)
-            round_coverage[round_id] += 1
-
-        # update UI progress + ETA
-        if progress_bar and status_text:
-            progress = (idx + 1) / max(total_rounds, 1)
-            elapsed = time.time() - start_time
-            avg_time = elapsed / (idx + 1) if (idx + 1) > 0 else 0.0
-            remaining = (total_rounds - (idx + 1)) * avg_time
-            status_text.text(f"🔄 Procesare rundă {idx + 1}/{total_rounds} — ⏱ Estimare {remaining:.1f}s")
-            progress_bar.progress(min(1.0, progress))
-            # tiny sleep to allow UI update
-            time.sleep(0.001)
-
-    # padding to desired_total if requested
-    if desired_total:
-        idx = 0
-        while len(selected_variants) < desired_total and idx < len(all_variants):
-            var_id, nums = all_variants[idx]
-            if var_id not in used_ids:
-                selected_variants.append({
-                    'id': var_id,
-                    'numbers': nums,
-                    'round_id': None,
-                    'match_type': 'pad'
-                })
-                used_ids.add(var_id)
-            idx += 1
-
-    if status_text:
-        status_text.text("✅ Procesare completă.")
-        if progress_bar:
-            progress_bar.progress(1.0)
-
-    return selected_variants, round_coverage
-
-# ---------- Statistical generator ----------
-def generate_statistical_coverage_variants(all_variants, historical_rounds, freq_counter,
-                                           hot_numbers, cold_numbers, normal_numbers,
-                                           pair_freq, triplet_freq,
-                                           target_count=365, max_num=66, progress_callback=None):
-    """
-    Scorează variante și alege greedy pentru acoperire.
-    Dacă all_variants sunt puse sub formă (id, nums) - le folosim.
-    Returnează selected list, number_coverage, pair_coverage
-    """
-    st.info("📊 Scorez și aleg variante statistice...")
-    # Prepare num scores
-    all_nums = set(range(1, max_num + 1))
-    max_freq = max(freq_counter.values()) if freq_counter else 1
-    num_scores = {}
-    for n in all_nums:
-        score = 0
-        if n in hot_numbers:
-            score += 100
-        elif n in normal_numbers:
-            score += 50
-        elif n not in freq_counter:
-            score += 25
-        elif n in cold_numbers:
-            score += 5
-        score += (freq_counter.get(n, 0) / max_freq) * 30
-        num_scores[n] = score
-
-    scored = []
-    for idx, (vid, nums) in enumerate(all_variants):
-        s = 0
-        varset = set(nums)
-        for n in nums:
-            s += num_scores.get(n, 0)
-        cold_count = len(varset & cold_numbers)
-        if cold_count >= 3:
-            s -= cold_count * 100
-        elif cold_count >= 2:
-            s -= cold_count * 50
-        s += len(varset & hot_numbers) * 50
-        # pair & triplet bonuses
-        for pair in combinations(nums, 2):
-            s += pair_freq.get(tuple(sorted(pair)), 0) * 5
-        for trip in combinations(nums, 3):
-            s += triplet_freq.get(tuple(sorted(trip)), 0) * 10
-        # balance across thirds
-        r1 = sum(1 for n in nums if n <= max_num//3)
-        r2 = sum(1 for n in nums if max_num//3 < n <= 2*max_num//3)
-        r3 = sum(1 for n in nums if n > 2*max_num//3)
-        if r1 and r2 and r3:
-            s += 30
-        balance = abs(r1 - r2) + abs(r2 - r3) + abs(r1 - r3)
-        s += (6 - balance) * 5
-        # parity
-        even = sum(1 for n in nums if n % 2 == 0)
-        odd = len(nums) - even
-        s += (len(nums) - abs(even - odd)) * 10
-        # missing numbers cover
-        missing_covered = len(varset & (all_nums - set(freq_counter.keys())))
-        s += missing_covered * 80
-        scored.append({'id': vid, 'numbers': nums, 'score': s, 'hot_count': len(varset & hot_numbers), 'cold_count': cold_count})
-
-        if progress_callback and idx % 2000 == 0:
-            progress_callback(idx / max(1, len(all_variants)))
-
-    scored.sort(key=lambda x: x['score'], reverse=True)
-
-    selected = []
-    number_coverage = Counter()
-    pair_coverage = Counter()
-
-    # greedy selection
-    for v in scored:
-        if len(selected) >= target_count:
-            break
-        nums = v['numbers']
-        new_nums = set(nums) - set(number_coverage.keys())
-        coverage_value = len(new_nums) * 10
-        min_cov = min(number_coverage.values()) if number_coverage else 0
-        for n in nums:
-            if number_coverage.get(n, 0) <= min_cov + 1:
-                coverage_value += 5
-        if coverage_value > 0 or len(selected) < target_count // 3:
-            selected.append(v)
-            number_coverage.update(nums)
-            for p in combinations(nums, 2):
-                pair_coverage[tuple(sorted(p))] += 1
-
-    # fill remaining if some numbers are still missing
-    all_nums_set = set(range(1, max_num + 1))
-    covered_numbers = set(number_coverage.keys())
-    still_missing = all_nums_set - covered_numbers
-    if still_missing:
-        for v in scored:
-            if len(selected) >= target_count:
-                break
-            if v in selected:
-                continue
-            if set(v['numbers']) & still_missing:
-                selected.append(v)
-                number_coverage.update(v['numbers'])
-                for p in combinations(v['numbers'], 2):
-                    pair_coverage[tuple(sorted(p))] += 1
-                still_missing -= set(v['numbers'])
-    # pad to target_count
-    i = 0
-    while len(selected) < target_count and i < len(scored):
-        if scored[i] not in selected:
-            selected.append(scored[i])
-            number_coverage.update(scored[i]['numbers'])
-            for p in combinations(scored[i]['numbers'], 2):
-                pair_coverage[tuple(sorted(p))] += 1
-        i += 1
-
-    # convert to canonical dict shape (like find_perfect_matches)
-    out = []
-    for v in selected:
-        out.append({'id': v['id'], 'numbers': v['numbers'], 'match_type': 'statistical', 'score': v['score'], 'hot_count': v['hot_count'], 'cold_count': v['cold_count']})
-
-    return out, number_coverage, pair_coverage
-
-# ---------- Export helper ----------
-def export_to_txt(variants):
-    lines = []
-    for v in variants:
-        vid = v.get('id', '')
-        nums = ' '.join(str(n) for n in v.get('numbers', []))
-        lines.append(f"{vid}, {nums}")
-    return "\n".join(lines)
-
-# ---------------- UI: Upload & Config ----------------
-st.header("📥 1. Import Variants & Historical Rounds")
-colA, colB = st.columns(2)
-with colA:
-    uploaded_variants = st.file_uploader("Încarcă fișier variante (CSV / XLSX / TXT)", type=["csv", "xlsx", "txt"], key="variants_file")
-    if uploaded_variants:
-        st.success(f"Fișier variante: {uploaded_variants.name}")
-with colB:
-    uploaded_rounds = st.file_uploader("Încarcă fișier runde istorice (CSV / XLSX / TXT)", type=["csv", "xlsx", "txt"], key="rounds_file")
-    if uploaded_rounds:
-        st.success(f"Fișier runde: {uploaded_rounds.name}")
-
-st.markdown("---")
-st.header("⚙️ 2. Configurare Generare PRO")
-col1, col2, col3 = st.columns(3)
-with col1:
-    coverage_variants = st.number_input("Variante Pas 1 (4/4 garantat)", min_value=1, max_value=5000, value=800, step=1)
-with col2:
-    number_variants = st.number_input("Variante Pas 2 (statistici)", min_value=1, max_value=5000, value=365, step=1)
-with col3:
-    max_number = st.number_input("Număr maxim (plajă)", min_value=10, max_value=100, value=66, step=1)
-
-st.write(f"📊 Total variante generate (Pas1 + Pas2): **{coverage_variants + number_variants}**")
-st.markdown("---")
-
-# ---------------- RUN button ----------------
-if st.button("🚀 GENEREAZĂ CU GARANȚIE 4/4", type="primary"):
-    # Validate inputs
-    if not uploaded_variants or not uploaded_rounds:
-        st.error("Încarcă ambele fișiere: variante și runde istorice înainte de generare.")
-    else:
-        # Load files
-        with st.spinner("📥 Încarc fișierele..."):
-            all_variants = load_variants_from_file(uploaded_variants)
-            historical_rounds = load_rounds_from_file(uploaded_rounds)
-
-        if not all_variants:
-            st.error("Fișier variante invalid sau nu conține rânduri parse-abile.")
-        elif not historical_rounds:
-            st.error("Fișier runde invalid sau nu conține rânduri parse-abile.")
+    with chart_area:
+        if st.session_state.history:
+            hist_df = pd.DataFrame(st.session_state.history)
+            hist_df.set_index("time", inplace=True)
+            st.subheader("Odds & BTC History (last 120 ticks)")
+            st.line_chart(hist_df[["up_odds", "down_odds", "btc_price"]], use_container_width=True)
         else:
-            st.info("🔁 Încep generarea — vezi progresul mai jos.")
-            progress_bar = st.progress(0.0)
-            status_text = st.empty()
-            start_all = time.time()
+            st.info("Waiting for first data tick...")
 
-            # PASS 1: find perfect matches (deterministic index)
-            target_per_round = 2
-            covering_vars, round_coverage = find_perfect_matches(
-                all_variants,
-                historical_rounds,
-                target_per_round=target_per_round,
-                desired_total=coverage_variants,
-                progress_bar=progress_bar,
-                status_text=status_text
+    with df_details:
+        if result:
+            st.subheader("Analysis Details")
+            st.json(
+                {
+                    "window": window.model_dump(),
+                    "btc_price": result.btc_price,
+                    "open_price": result.open_price,
+                    "delta_pct": f"{result.delta_pct:.4%}",
+                    "funding_rate": result.funding_rate,
+                    "signal": signal.model_dump() if signal else None,
+                    "market": market.model_dump() if market else None,
+                    "best_bid": bb,
+                    "best_ask": ba,
+                    "spread": f"{ba - bb:.2f}" if bb and ba else None,
+                }
             )
 
-            # compute historical stats
-            freq_counter = Counter()
-            for _, nums in historical_rounds:
-                for n in nums:
-                    freq_counter[n] += 1
-            pair_freq = Counter()
-            triplet_freq = Counter()
-            for _, nums in historical_rounds:
-                for p in combinations(nums, 2):
-                    pair_freq[tuple(sorted(p))] += 1
-                for t in combinations(nums, 3):
-                    triplet_freq[tuple(sorted(t))] += 1
+    with alert_area:
+        st.subheader("Alerts")
+        if st.session_state.alerts:
+            for a in st.session_state.alerts[:10]:
+                emoji = {"EDGE": "🎯", "HIGH_CONF": "🔥", "ARBITRAGE": "⚠️"}.get(a["type"], "📢")
+                st.markdown(f"**{emoji} {a['time']} — {a['title']}**<br>{a['body']}", unsafe_allow_html=True)
+        else:
+            st.info("No alerts yet. Waiting for edge...")
 
-            avg_freq = np.mean(list(freq_counter.values())) if freq_counter else 0
-            hot_numbers = set(n for n, f in freq_counter.items() if f > avg_freq + np.std(list(freq_counter.values())) * 0.5) if freq_counter else set()
-            cold_numbers = set(n for n, f in freq_counter.items() if f < avg_freq - np.std(list(freq_counter.values())) * 0.5) if freq_counter else set()
-            normal_numbers = set(freq_counter.keys()) - hot_numbers - cold_numbers
+    with tech_area:
+        if signal and signal.indicators:
+            for k, v in signal.indicators.items():
+                if v is not None:
+                    st.text(f"{k}: {v}")
+        else:
+            st.text("No indicators yet.")
 
-            # PASS 2: generate statistical variants (with light progress callback optionally)
-            def progress_cb(p):
-                try:
-                    progress_bar.progress(0.5 + 0.4 * min(1.0, p))
-                except Exception:
-                    pass
+    with debug_raw:
+        err = st.session_state.get("_last_fetch_err", "")
+        st.write(f"Last fetch error: `{err}`" if err else "No errors.")
+        st.write(f"History ticks: {len(st.session_state.history)}")
+        st.write(f"Window start: {window.window_start_ts}")
+        st.write(f"Open price (session): {st.session_state.window_open_price}")
 
-            number_vars, number_coverage, pair_coverage = generate_statistical_coverage_variants(
-                all_variants,
-                historical_rounds,
-                freq_counter,
-                hot_numbers,
-                cold_numbers,
-                normal_numbers,
-                pair_freq,
-                triplet_freq,
-                target_count=number_variants,
-                max_num=max_number,
-                progress_callback=progress_cb
-            )
-
-            # combine results
-            final_variants = covering_vars + number_vars
-            # compute complete coverage counts
-            complete_coverage = Counter()
-            for v in final_variants:
-                complete_coverage.update(v['numbers'])
-
-            elapsed = time.time() - start_all
-            status_text.text(f"✅ Finalizat în {elapsed:.1f}s — {len(final_variants)} variante generate.")
-            progress_bar.progress(1.0)
-
-            # ---------- Analysis & Test on historical rounds ----------
-            st.markdown("---")
-            st.header("📊 Rezultate & Analiză")
-            colA, colB, colC, colD = st.columns(4)
-            with colA:
-                st.metric("✅ Variante generate", len(final_variants))
-            with colB:
-                paso1_count = sum(1 for v in final_variants if v.get('match_type') == '4/4')
-                st.metric("🎯 Variante 4/4 (Pas1)", paso1_count)
-            with colC:
-                covered_numbers = [n for n in range(1, max_number + 1) if complete_coverage.get(n, 0) > 0]
-                st.metric("🌐 Numere acoperite", f"{len(covered_numbers)}/{max_number}")
-            with colD:
-                avg_cov = sum(complete_coverage.values()) / max(1, len(complete_coverage))
-                st.metric("📊 Acoperire medie", f"{avg_cov:.1f}x")
-
-            # Test pe runde istorice: distribuție de matches
-            match_dist = Counter()
-            winning_variants = []
-            for v in final_variants:
-                wins = 0
-                for _, round_nums in historical_rounds:
-                    m = count_matches(v['numbers'], round_nums)
-                    match_dist[m] += 1
-                    if m >= 2:
-                        wins += 1
-                if wins > 0:
-                    winning_variants.append((v, wins))
-
-            st.write(f"🏆 Variante câștigătoare (au >=2 potriviri pe istoric): {len(winning_variants)}/{len(final_variants)}")
-            st.write(f"🔎 Distribuție potriviri (pe toate comparațiile): {dict(match_dist)}")
-            # show top hot / cold
-            st.markdown("**🔥 Top 15 numere folosite în variante**")
-            top_nums = complete_coverage.most_common(15)
-            for i, (num, cnt) in enumerate(top_nums, 1):
-                tag = "🔥" if num in hot_numbers else ""
-                st.text(f"{i}. {num}: {cnt}x {tag}")
-
-            # ---------- Export buttons ----------
-            st.markdown("---")
-            st.header("💾 Export")
-            txt_all = export_to_txt(final_variants)
-            txt_4 = export_to_txt([v for v in final_variants if v.get('match_type') == '4/4'])
-            txt_stat = export_to_txt([v for v in final_variants if v.get('match_type') == 'statistical' or v.get('match_type') == 'pad'])
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.download_button("📥 Descarcă TOATE variantele (.txt)", txt_all, file_name=f"variante_complete_{len(final_variants)}.txt", mime="text/plain")
-            with col2:
-                st.download_button("🎯 Descarcă 4/4 (.txt)", txt_4, file_name=f"variante_4din4_{len([v for v in final_variants if v.get('match_type')=='4/4'])}.txt", mime="text/plain")
-            with col3:
-                st.download_button("📊 Descarcă statistice (.txt)", txt_stat, file_name=f"variante_stat_{len([v for v in final_variants if v.get('match_type')!='4/4'])}.txt", mime="text/plain")
-
-            st.success("✅ Gata — poți descărca rezultatele sau re-executa cu alți parametri.")
-            st.markdown("---")
-            st.caption("Generator Inteligent Loterie PRO — versiune completă")
+    # ── Auto-refresh ─────────────────────────────────────────
+    st.caption("Auto-refresh every 2.5s...")
+    time.sleep(CFG.POLL_INTERVAL)
+    st.rerun()
