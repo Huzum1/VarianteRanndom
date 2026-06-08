@@ -3,13 +3,14 @@ Polymarket BTC 5m Analyzer — Single-File Streamlit Edition.
 
 Totul într-un singur fișier: fetchere, analiză, predictor, dashboard live.
 Rulare:  streamlit run app.py
+
+V2.1: Error diagnostics, Demo Mode, robust cloud deployment.
 """
 
 # ═══════════════════════════════════════════════════════════
 # 1. IMPORTS
 # ═══════════════════════════════════════════════════════════
 import json
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +20,7 @@ import pandas as pd
 import requests
 from pydantic import BaseModel, Field, field_validator
 
-# Streamlit se importă doar în blocul principal ca să evităm warning-uri la import
+# Streamlit importat doar în __main__ pentru a preveni warning-uri la import/testare
 
 # ═══════════════════════════════════════════════════════════
 # 2. CONFIG
@@ -41,7 +42,7 @@ class CFG:
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. PYDANTIC MODELS (validare strictă, zero bug-uri de tip)
+# 3. PYDANTIC MODELS
 # ═══════════════════════════════════════════════════════════
 class MarketWindow(BaseModel):
     window_start_ts: int
@@ -149,30 +150,31 @@ def safe_json(resp: requests.Response) -> Optional[Any]:
         return None
 
 
-# Simple manual cache for Polymarket market (ttl 60s) to avoid rate limits
-__market_cache: Dict[str, Tuple[float, Any]] = {}
+# Simple cache
+__cache: Dict[str, Tuple[float, Any]] = {}
 
 
 def _cache_get(key: str, ttl: int = 60) -> Optional[Any]:
     now = time.time()
-    if key in __market_cache:
-        ts, val = __market_cache[key]
+    if key in __cache:
+        ts, val = __cache[key]
         if now - ts < ttl:
             return val
     return None
 
 
 def _cache_set(key: str, val: Any) -> None:
-    __market_cache[key] = (time.time(), val)
+    __cache[key] = (time.time(), val)
 
 
 # ═══════════════════════════════════════════════════════════
-# 5. DATA FETCHERS (sync, robust, cu fallback)
+# 5. DATA FETCHERS (cu diagnoze robuste)
 # ═══════════════════════════════════════════════════════════
-def fetch_polymarket_market(slug: str) -> Optional[PolymarketMarket]:
+def fetch_polymarket_market(slug: str, status: Dict[str, str]) -> Optional[PolymarketMarket]:
     """Gamma API — descoperă piața determinist după slug."""
     cached = _cache_get(slug)
     if cached is not None:
+        status["gamma"] = "OK (cached)"
         return cached
     try:
         r = requests.get(
@@ -184,13 +186,16 @@ def fetch_polymarket_market(slug: str) -> Optional[PolymarketMarket]:
         r.raise_for_status()
         data = safe_json(r)
         if not data:
+            status["gamma"] = "FAIL: empty response"
             return None
         if isinstance(data, list):
             data = data[0] if data else None
         if not data or not isinstance(data, dict):
+            status["gamma"] = "FAIL: invalid JSON structure"
             return None
         markets = data.get("markets", [])
         if not markets:
+            status["gamma"] = "FAIL: no markets in event (market may not exist yet)"
             return None
         m = markets[0]
         token_ids = m.get("clobTokenIds", [])
@@ -200,13 +205,19 @@ def fetch_polymarket_market(slug: str) -> Optional[PolymarketMarket]:
         except Exception:
             outs = ["Yes", "No"]
         if len(token_ids) < 2 or len(outs) < 2:
+            status["gamma"] = "FAIL: missing token IDs or outcomes"
             return None
 
         up_id, down_id = str(token_ids[0]), str(token_ids[1])
 
         # CLOB prices
-        up_b, up_s, up_m = fetch_clob_prices(up_id)
-        dn_b, dn_s, dn_m = fetch_clob_prices(down_id)
+        up_b, up_s, up_m, up_err = fetch_clob_prices(up_id, status)
+        dn_b, dn_s, dn_m, dn_err = fetch_clob_prices(down_id, status)
+
+        if up_err or dn_err:
+            status["gamma"] = f"OK metadata; CLOB err: {up_err or dn_err}"
+        else:
+            status["gamma"] = "OK"
 
         market = PolymarketMarket(
             slug=slug,
@@ -228,12 +239,19 @@ def fetch_polymarket_market(slug: str) -> Optional[PolymarketMarket]:
         )
         _cache_set(slug, market)
         return market
-    except Exception:
-        return None
+    except requests.exceptions.Timeout:
+        status["gamma"] = "FAIL: timeout (10s)"
+    except requests.exceptions.ConnectionError as e:
+        status["gamma"] = f"FAIL: connection error — {e}"
+    except requests.exceptions.HTTPError as e:
+        status["gamma"] = f"FAIL: HTTP {e.response.status_code}"
+    except Exception as e:
+        status["gamma"] = f"FAIL: {type(e).__name__}: {e}"
+    return None
 
 
-def fetch_clob_prices(token_id: str) -> Tuple[float, float, float]:
-    """CLOB API — best buy / sell / midpoint."""
+def fetch_clob_prices(token_id: str, status: Dict[str, str]) -> Tuple[float, float, float, Optional[str]]:
+    """CLOB API — best buy / sell / midpoint. Returnează și error string."""
     try:
         rb = requests.get(
             f"{CFG.CLOB_URL}/price",
@@ -247,12 +265,20 @@ def fetch_clob_prices(token_id: str) -> Tuple[float, float, float]:
         )
         b = float(safe_json(rb).get("price", 0.5) or 0.5) if rb.status_code == 200 else 0.5
         s = float(safe_json(rs).get("price", 0.5) or 0.5) if rs.status_code == 200 else 0.5
-        return round(b, 4), round(s, 4), round((b + s) / 2.0, 4)
-    except Exception:
-        return 0.5, 0.5, 0.5
+        status["clob"] = "OK"
+        return round(b, 4), round(s, 4), round((b + s) / 2.0, 4), None
+    except requests.exceptions.Timeout:
+        status["clob"] = "FAIL: timeout (8s)"
+        return 0.5, 0.5, 0.5, "timeout"
+    except requests.exceptions.ConnectionError:
+        status["clob"] = "FAIL: connection error"
+        return 0.5, 0.5, 0.5, "connection"
+    except Exception as e:
+        status["clob"] = f"FAIL: {type(e).__name__}"
+        return 0.5, 0.5, 0.5, str(e)
 
 
-def fetch_binance_price() -> Optional[float]:
+def fetch_binance_price(status: Dict[str, str]) -> Optional[float]:
     try:
         r = requests.get(
             f"{CFG.BINANCE_REST}/api/v3/ticker/price",
@@ -260,12 +286,20 @@ def fetch_binance_price() -> Optional[float]:
             timeout=8,
         )
         r.raise_for_status()
+        status["binance_price"] = "OK"
         return float(r.json()["price"])
-    except Exception:
-        return None
+    except requests.exceptions.Timeout:
+        status["binance_price"] = "FAIL: timeout (8s)"
+    except requests.exceptions.ConnectionError:
+        status["binance_price"] = "FAIL: connection error (Binance may block this IP)"
+    except requests.exceptions.HTTPError as e:
+        status["binance_price"] = f"FAIL: HTTP {e.response.status_code}"
+    except Exception as e:
+        status["binance_price"] = f"FAIL: {type(e).__name__}: {e}"
+    return None
 
 
-def fetch_binance_klines(limit: int = 20) -> pd.DataFrame:
+def fetch_binance_klines(limit: int, status: Dict[str, str]) -> pd.DataFrame:
     try:
         r = requests.get(
             f"{CFG.BINANCE_REST}/api/v3/klines",
@@ -287,12 +321,18 @@ def fetch_binance_klines(limit: int = 20) -> pd.DataFrame:
                     "close_time": pd.to_datetime(int(item[6]), unit="ms", utc=True),
                 }
             )
+        status["binance_klines"] = "OK"
         return pd.DataFrame(rows)
-    except Exception:
-        return pd.DataFrame()
+    except requests.exceptions.Timeout:
+        status["binance_klines"] = "FAIL: timeout (10s)"
+    except requests.exceptions.ConnectionError:
+        status["binance_klines"] = "FAIL: connection error (Binance may block this IP)"
+    except Exception as e:
+        status["binance_klines"] = f"FAIL: {type(e).__name__}: {e}"
+    return pd.DataFrame()
 
 
-def fetch_binance_funding() -> Optional[float]:
+def fetch_binance_funding(status: Dict[str, str]) -> Optional[float]:
     try:
         r = requests.get(
             f"{CFG.BINANCE_FAPI}/fapi/v1/premiumIndex",
@@ -300,12 +340,18 @@ def fetch_binance_funding() -> Optional[float]:
             timeout=8,
         )
         r.raise_for_status()
+        status["binance_funding"] = "OK"
         return float(r.json().get("lastFundingRate", 0) or 0)
-    except Exception:
-        return None
+    except requests.exceptions.Timeout:
+        status["binance_funding"] = "FAIL: timeout"
+    except requests.exceptions.ConnectionError:
+        status["binance_funding"] = "FAIL: connection error"
+    except Exception as e:
+        status["binance_funding"] = f"FAIL: {type(e).__name__}: {e}"
+    return None
 
 
-def fetch_binance_depth() -> Tuple[Optional[float], Optional[float]]:
+def fetch_binance_depth(status: Dict[str, str]) -> Tuple[Optional[float], Optional[float]]:
     try:
         r = requests.get(
             f"{CFG.BINANCE_REST}/api/v3/depth",
@@ -318,13 +364,18 @@ def fetch_binance_depth() -> Tuple[Optional[float], Optional[float]]:
         asks = data.get("asks", [])
         bb = float(bids[0][0]) if bids else None
         ba = float(asks[0][0]) if asks else None
+        status["binance_depth"] = "OK"
         return bb, ba
-    except Exception:
-        return None, None
+    except requests.exceptions.Timeout:
+        status["binance_depth"] = "FAIL: timeout"
+    except requests.exceptions.ConnectionError:
+        status["binance_depth"] = "FAIL: connection error"
+    except Exception as e:
+        status["binance_depth"] = f"FAIL: {type(e).__name__}: {e}"
+    return None, None
 
 
 def get_window_open_price(window_start_ts: int, df: pd.DataFrame) -> Optional[float]:
-    """Găsește open price din candle-ul 1m care conține window_start_ts."""
     if df.empty:
         return None
     target = pd.to_datetime(window_start_ts, unit="s", utc=True)
@@ -335,7 +386,7 @@ def get_window_open_price(window_start_ts: int, df: pd.DataFrame) -> Optional[fl
 
 
 # ═══════════════════════════════════════════════════════════
-# 6. ANALYSIS (pure functions, ușor de testat)
+# 6. ANALYSIS (pure functions)
 # ═══════════════════════════════════════════════════════════
 def calc_delta(open_price: float, current_price: float) -> float:
     if open_price <= 0:
@@ -357,16 +408,14 @@ def delta_weight(delta_pct: float) -> float:
 
 
 def delta_to_signal(delta_pct: float, seconds_left: int) -> Signal:
-    raw_prob = 0.50 + delta_pct * 500  # probabilitatea de UP (direct proportional cu delta)
-    # Aplicăm clamping inițial
+    raw_prob = 0.50 + delta_pct * 500
     base = max(0.0, min(1.0, raw_prob))
-    # Penalizare / boost în funcție de timpul rămas
     if seconds_left > 60:
-        base = 0.5 + (base - 0.5) * 0.80  # retragere spre 0.5
+        base = 0.5 + (base - 0.5) * 0.80
     elif seconds_left > 30:
         base = 0.5 + (base - 0.5) * 0.90
     elif seconds_left <= 10:
-        base = 0.5 + (base - 0.5) * 1.05  # boost
+        base = 0.5 + (base - 0.5) * 1.05
     base = max(0.0, min(1.0, base))
     side = "UP" if delta_pct >= 0 else "DOWN"
     conf = base if side == "UP" else (1.0 - base)
@@ -519,7 +568,63 @@ def detect_edge(market: Optional[PolymarketMarket], signal: Optional[Signal]) ->
 
 
 # ═══════════════════════════════════════════════════════════
-# 7. STREAMLIT UI & MAIN LOOP (protejat)
+# 7. DEMO DATA GENERATOR (pentru testare UI când API-urile eșuează)
+# ═══════════════════════════════════════════════════════════
+def generate_demo_data(window: MarketWindow) -> Tuple[PolymarketMarket, float, pd.DataFrame, float, float, float]:
+    """Generează date simulate realistice pentru a testa UI-ul."""
+    base_price = 105000.0
+    # Simulăm un preț în creștere ușoară
+    price = base_price + (window.progress * 80) + np.random.normal(0, 15)
+    
+    # Simulăm istoric de 20 lumânări
+    rows = []
+    for i in range(20):
+        t = window.window_start_ts - (20 - i) * 60
+        rows.append({
+            "open_time": pd.to_datetime(t, unit="s", utc=True),
+            "open": base_price + i * 4,
+            "high": base_price + i * 4 + 20,
+            "low": base_price + i * 4 - 20,
+            "close": base_price + i * 4 + 10,
+            "volume": 100 + np.random.randint(0, 50),
+            "close_time": pd.to_datetime(t + 60, unit="s", utc=True),
+        })
+    df = pd.DataFrame(rows)
+    
+    # Odds simulate: UP crescător, DOWN descrescător
+    up_mid = 0.50 + (window.progress * 0.18) + np.random.normal(0, 0.01)
+    up_mid = max(0.02, min(0.98, up_mid))
+    down_mid = 1.0 - up_mid + np.random.normal(0, 0.005)
+    down_mid = max(0.02, min(0.98, down_mid))
+    # Re-normalizăm
+    total = up_mid + down_mid
+    up_mid = up_mid / total
+    down_mid = down_mid / total
+    
+    spread = 0.02
+    market = PolymarketMarket(
+        slug=window.slug,
+        market_id="DEMO123",
+        question="Will BTC be UP at 5m?",
+        up_buy=round(up_mid - spread/2, 4),
+        up_sell=round(up_mid + spread/2, 4),
+        up_mid=round(up_mid, 4),
+        down_buy=round(down_mid - spread/2, 4),
+        down_sell=round(down_mid + spread/2, 4),
+        down_mid=round(down_mid, 4),
+        volume=150000.0,
+        liquidity=45000.0,
+    )
+    
+    open_price = rows[0]["open"]
+    funding = 0.0001
+    bb = price - 10
+    ba = price + 10
+    return market, price, df, open_price, funding, bb, ba
+
+
+# ═══════════════════════════════════════════════════════════
+# 8. STREAMLIT UI
 # ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
     import streamlit as st
@@ -530,63 +635,84 @@ if __name__ == "__main__":
         initial_sidebar_state="collapsed",
     )
 
-    # ── Session State Init ────────────────────────────────────
+    # ── Sidebar ──────────────────────────────────────────────
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        demo_mode = st.toggle("🎮 Demo Mode (simulate data)", value=False, help="When APIs fail, use this to see the UI and logic working with fake data")
+        st.divider()
+        st.markdown("**Status Legend:**")
+        st.markdown("🟢 OK — API responded")
+        st.markdown("🔴 FAIL — API error (hover for details)")
+        st.divider()
+        st.caption("v2.1 — Single-file Streamlit Edition")
+
+    # ── Session State ────────────────────────────────────────
     if "history" not in st.session_state:
         st.session_state.history = []
         st.session_state.alerts = []
         st.session_state.last_window_ts = 0
         st.session_state.window_open_price = None
-        st.session_state._last_fetch_err = ""
 
-    st.title("🔮 Polymarket BTC 5m Analyzer — Live Streamlit Edition")
-    st.caption("Single-file. Zero dependencies externe. Dashboard + predictor + alerte.")
+    st.title("🔮 Polymarket BTC 5m Analyzer")
+    st.caption("Live dashboard + predictor + edge detector. Toggle Demo Mode in sidebar if APIs are blocked.")
 
-    # ── Layout placeholders ───────────────────────────────────
     window = current_window()
-    progress_text = st.empty()
-    progress_bar = st.progress(0.0)
+    status: Dict[str, str] = {}
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        btc_metric = st.empty()
-    with m2:
-        up_metric = st.empty()
-    with m3:
-        down_metric = st.empty()
-    with m4:
-        sig_metric = st.empty()
+    # ── Status Panel ─────────────────────────────────────────
+    st.subheader("🌐 API Status")
+    status_cols = st.columns(6)
+    
+    def render_status(key: str, label: str, col):
+        s = status.get(key, "PENDING")
+        if s.startswith("OK"):
+            col.metric(label, "🟢 OK", delta=None)
+        elif s.startswith("FAIL"):
+            col.metric(label, "🔴 FAIL", delta=s[6:30] if len(s) > 6 else None)
+        else:
+            col.metric(label, "⚪ ...", delta=None)
+    
+    # ── Data Fetching ──────────────────────────────────────
+    if demo_mode:
+        market, btc_price, klines_df, open_price, funding, bb, ba = generate_demo_data(window)
+        status = {k: "OK (demo)" for k in ["gamma", "clob", "binance_price", "binance_klines", "binance_funding", "binance_depth"]}
+        st.session_state.window_open_price = open_price
+    else:
+        # New window detection
+        if window.window_start_ts != st.session_state.last_window_ts:
+            st.session_state.last_window_ts = window.window_start_ts
+            klines_df = fetch_binance_klines(5, status)
+            st.session_state.window_open_price = get_window_open_price(window.window_start_ts, klines_df)
+        
+        market = fetch_polymarket_market(window.slug, status)
+        btc_price = fetch_binance_price(status)
+        klines_df = fetch_binance_klines(20, status)
+        funding = fetch_binance_funding(status)
+        bb, ba = fetch_binance_depth(status)
+        open_price = st.session_state.window_open_price
 
-    col_left, col_right = st.columns([2, 1])
-    with col_left:
-        chart_area = st.empty()
-        df_details = st.empty()
-    with col_right:
-        alert_area = st.empty()
-        st.subheader("Technical Indicators")
-        tech_area = st.empty()
-
-    with st.expander("Debug / Raw Data"):
-        debug_raw = st.empty()
-
-    # ── Main Cycle ───────────────────────────────────────────
-    # New window detection
-    if window.window_start_ts != st.session_state.last_window_ts:
-        st.session_state.last_window_ts = window.window_start_ts
-        klines_df = fetch_binance_klines(limit=5)
-        st.session_state.window_open_price = get_window_open_price(window.window_start_ts, klines_df)
-
-    # Fetch data
-    market = fetch_polymarket_market(window.slug)
-    btc_price = fetch_binance_price()
-    klines_df = fetch_binance_klines(limit=20)
-    funding = fetch_binance_funding()
-    bb, ba = fetch_binance_depth()
-
-    # Analysis
-    open_price = st.session_state.window_open_price
+    # Render status after fetch
+    status_labels = [
+        ("gamma", "Polymarket γ"),
+        ("clob", "Polymarket CLOB"),
+        ("binance_price", "Binance Price"),
+        ("binance_klines", "Binance Klines"),
+        ("binance_funding", "Binance Funding"),
+        ("binance_depth", "Binance Depth"),
+    ]
+    for i, (key, label) in enumerate(status_labels):
+        render_status(key, label, status_cols[i])
+    
+    # Show full status details in expander
+    with st.expander("Detailed API diagnostics"):
+        for key, label in status_labels:
+            st.write(f"**{label}:** {status.get(key, 'not called')}")
+    
+    # ── Analysis ───────────────────────────────────────────
     signal = None
     result = None
-
+    delta_pct = 0.0
+    
     if open_price and btc_price:
         delta_pct = calc_delta(open_price, btc_price)
         signal = predict_signal(window, klines_df, open_price, btc_price, funding)
@@ -599,14 +725,15 @@ if __name__ == "__main__":
             funding_rate=funding,
             signal=signal,
         )
-
+        
         alert = detect_edge(market, signal)
         if alert:
             alert["time"] = datetime.now(timezone.utc).strftime("%H:%M:%S")
             st.session_state.alerts.insert(0, alert)
             if len(st.session_state.alerts) > 30:
                 st.session_state.alerts = st.session_state.alerts[:30]
-
+            st.toast(f"🚨 {alert['title']}", icon="⚡")
+        
         st.session_state.history.append(
             {
                 "time": datetime.now(timezone.utc),
@@ -620,35 +747,34 @@ if __name__ == "__main__":
         )
         if len(st.session_state.history) > 120:
             st.session_state.history = st.session_state.history[-120:]
-
-    # ── Render ───────────────────────────────────────────────
+    
+    # ── Progress ───────────────────────────────────────────
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
     progress_bar.progress(window.progress)
-    progress_text.markdown(
-        f"**Window:** `{window.slug}` — ⏱️ **{window.seconds_remaining}s** remaining"
-    )
-
-    with btc_metric:
+    progress_text.markdown(f"**Window:** `{window.slug}` — ⏱️ **{window.seconds_remaining}s** remaining")
+    
+    # ── Metrics ────────────────────────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
         st.metric(
             label="BTC Price",
             value=f"${btc_price:,.2f}" if btc_price else "N/A",
-            delta=f"{calc_delta(open_price, btc_price)*100:.4f}%" if open_price and btc_price else None,
+            delta=f"{delta_pct*100:.4f}%" if open_price and btc_price else None,
         )
-
-    with up_metric:
+    with m2:
         st.metric(
             label="Polymarket UP",
             value=f"{market.implied_up:.2%}" if market else "N/A",
             delta=f"buy {market.up_buy:.2f} / sell {market.up_sell:.2f}" if market else None,
         )
-
-    with down_metric:
+    with m3:
         st.metric(
             label="Polymarket DOWN",
             value=f"{market.implied_down:.2%}" if market else "N/A",
             delta=f"buy {market.down_buy:.2f} / sell {market.down_sell:.2f}" if market else None,
         )
-
-    with sig_metric:
+    with m4:
         if signal:
             color = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🟠", "UNCERTAIN": "⚪"}.get(signal.confidence_level, "⚪")
             st.metric(
@@ -658,19 +784,20 @@ if __name__ == "__main__":
             )
         else:
             st.metric(label="Signal", value="N/A")
-
-    with chart_area:
+    
+    # ── Main Content ───────────────────────────────────────
+    col_left, col_right = st.columns([2, 1])
+    with col_left:
         if st.session_state.history:
             hist_df = pd.DataFrame(st.session_state.history)
             hist_df.set_index("time", inplace=True)
-            st.subheader("Odds & BTC History (last 120 ticks)")
+            st.subheader("📈 Odds & BTC History (last 120 ticks)")
             st.line_chart(hist_df[["up_odds", "down_odds", "btc_price"]], use_container_width=True)
         else:
             st.info("Waiting for first data tick...")
-
-    with df_details:
+        
         if result:
-            st.subheader("Analysis Details")
+            st.subheader("📋 Analysis Details")
             st.json(
                 {
                     "window": window.model_dump(),
@@ -685,32 +812,25 @@ if __name__ == "__main__":
                     "spread": f"{ba - bb:.2f}" if bb and ba else None,
                 }
             )
-
-    with alert_area:
-        st.subheader("Alerts")
+    
+    with col_right:
+        st.subheader("🚨 Alerts")
         if st.session_state.alerts:
             for a in st.session_state.alerts[:10]:
                 emoji = {"EDGE": "🎯", "HIGH_CONF": "🔥", "ARBITRAGE": "⚠️"}.get(a["type"], "📢")
                 st.markdown(f"**{emoji} {a['time']} — {a['title']}**<br>{a['body']}", unsafe_allow_html=True)
         else:
             st.info("No alerts yet. Waiting for edge...")
-
-    with tech_area:
+        
+        st.subheader("📊 Technicals")
         if signal and signal.indicators:
             for k, v in signal.indicators.items():
                 if v is not None:
                     st.text(f"{k}: {v}")
         else:
             st.text("No indicators yet.")
-
-    with debug_raw:
-        err = st.session_state.get("_last_fetch_err", "")
-        st.write(f"Last fetch error: `{err}`" if err else "No errors.")
-        st.write(f"History ticks: {len(st.session_state.history)}")
-        st.write(f"Window start: {window.window_start_ts}")
-        st.write(f"Open price (session): {st.session_state.window_open_price}")
-
-    # ── Auto-refresh ─────────────────────────────────────────
-    st.caption("Auto-refresh every 2.5s...")
+    
+    # ── Auto-refresh ───────────────────────────────────────
+    st.caption(f"Auto-refresh every {CFG.POLL_INTERVAL}s...")
     time.sleep(CFG.POLL_INTERVAL)
     st.rerun()
